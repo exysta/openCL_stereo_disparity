@@ -1,3 +1,0 @@
-/workspaces/openCL_stereo_disparity/OpenCL/src/build/CMakeFiles/HelloOpenCL.dir
-/workspaces/openCL_stereo_disparity/OpenCL/src/build/CMakeFiles/edit_cache.dir
-/workspaces/openCL_stereo_disparity/OpenCL/src/build/CMakeFiles/rebuild_cache.dir
