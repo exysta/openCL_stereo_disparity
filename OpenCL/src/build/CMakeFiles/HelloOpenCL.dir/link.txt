@@ -1,0 +1,1 @@
+/usr/bin/cc -rdynamic CMakeFiles/HelloOpenCL.dir/helloOpenCL.c.o -o HelloOpenCL  -Wl,-rpath,/usr/lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu/libOpenCL.so 

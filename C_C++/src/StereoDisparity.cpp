@@ -111,19 +111,19 @@ Image computeDisparity(const Image& left, const Image& right, int max_disp, int 
 }
 
 int main() {
-    Image left = load_image("view1.png");
-    Image right = load_image("view5.png");
+    Image left = load_image("../output/image_0_bw.png");
+    Image right = load_image("../output/image_1_bw.png");
     
     if(left.width != right.width || left.height != right.height) {
         cerr << "Error: Images must have the same dimensions!" << endl;
         return 1;
     }
 
-    int max_disparity = 64;
-    int window_size = 5;
+    int max_disparity = 50;
+    int window_size = 9;
     
     Image disparity = computeDisparity(left, right, max_disparity, window_size);
-    save_disparity("disparity.png", disparity);
+    save_disparity("../output/disparity.png", disparity);
     
     cout << "Disparity map saved as disparity.png" << endl;
     return 0;
