@@ -1,7 +1,7 @@
 CXX = g++
-CXXFLAGS = -O2 -Wall
+CXXFLAGS = -Wall -O3 -march=native -ftree-vectorize 
 TARGET = StereoDisparityParallel
-SRCS = StereoDisparityParallel.cpp
+SRCS = StereoDisparityParallel.cpp lodepng.cpp
 
 all: $(TARGET)
 
