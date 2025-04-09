@@ -1,6 +1,12 @@
 {
     "files.associations": {
         "ostream": "cpp",
-        "algorithm": "cpp"
+        "algorithm": "cpp",
+        "stdlib.h": "c",
+        "stdio.h": "c",
+        "iostream": "cpp",
+        "format": "cpp",
+        "optional": "cpp",
+        "variant": "cpp"
     }
 }
