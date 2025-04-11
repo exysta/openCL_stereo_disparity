@@ -10,9 +10,11 @@
 #include <chrono>   // For timing
 #include <numeric>  // For std::accumulate in timing (optional)
 #include <algorithm> // For std::max
+#include <filesystem> // Requires C++17 for directory creation
 
-// Custom OpenCL exception class (keep as is)
+// Custom OpenCLException (keep as is)
 class OpenCLException : public std::runtime_error {
+// ... (implementation as before) ...
 public:
     OpenCLException(const std::string& message, cl_int error)
         : std::runtime_error(message + ": Error code " + std::to_string(error)), error_code(error) {}
@@ -41,6 +43,7 @@ void printDeviceInfo(cl_device_id device) {
     cl_ulong maxConstantBufferSize;
     size_t maxWorkGroupSize;
     size_t maxWorkItemSizes[3];
+    cl_bool imageSupport = CL_FALSE; // Check for image support
 
     error = clGetDeviceInfo(device, CL_DEVICE_LOCAL_MEM_TYPE, sizeof(localMemType), &localMemType, NULL);
     checkError(error, "Failed to get CL_DEVICE_LOCAL_MEM_TYPE");
@@ -63,6 +66,10 @@ void printDeviceInfo(cl_device_id device) {
     error = clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof(maxWorkItemSizes), &maxWorkItemSizes, NULL);
     checkError(error, "Failed to get CL_DEVICE_MAX_WORK_ITEM_SIZES");
 
+    error = clGetDeviceInfo(device, CL_DEVICE_IMAGE_SUPPORT, sizeof(imageSupport), &imageSupport, NULL);
+    checkError(error, "Failed to get CL_DEVICE_IMAGE_SUPPORT");
+
+
     std::cout << "==== GPU Device Information ====" << std::endl;
     std::cout << "CL_DEVICE_LOCAL_MEM_TYPE: " << (localMemType == CL_LOCAL ? "CL_LOCAL" : "CL_GLOBAL") << std::endl;
     std::cout << "CL_DEVICE_LOCAL_MEM_SIZE: " << localMemSize << " bytes" << std::endl;
@@ -72,7 +79,13 @@ void printDeviceInfo(cl_device_id device) {
     std::cout << "CL_DEVICE_MAX_WORK_GROUP_SIZE: " << maxWorkGroupSize << std::endl;
     std::cout << "CL_DEVICE_MAX_WORK_ITEM_SIZES: [" << maxWorkItemSizes[0] << ", "
               << maxWorkItemSizes[1] << ", " << maxWorkItemSizes[2] << "]" << std::endl;
+    std::cout << "CL_DEVICE_IMAGE_SUPPORT: " << (imageSupport ? "Yes" : "No") << std::endl; // Print image support
     std::cout << "================================" << std::endl;
+
+    if (!imageSupport) {
+        std::cerr << "Warning: Selected OpenCL device does not support images!" << std::endl;
+        // Consider throwing an error here if images are essential
+    }
 }
 
 // Function to load PNG images (keep as is)
@@ -114,13 +127,20 @@ bool loadImages(const std::string& file1, const std::string& file2,
 void saveGrayscalePNG(const std::string& filename,
                       const std::vector<unsigned char>& imageData,
                       unsigned width, unsigned height) {
-    // ... (implementation as before) ...
-     unsigned error = lodepng::encode(filename, imageData, width, height, LCT_GREY, 8);
+    // Create directory if it doesn't exist (C++17)
+    std::filesystem::path filePath(filename);
+    std::filesystem::path dirPath = filePath.parent_path();
+    if (!dirPath.empty() && !std::filesystem::exists(dirPath)) {
+        std::cout << "Creating output directory: " << dirPath << std::endl;
+        std::filesystem::create_directories(dirPath);
+    }
+
+    unsigned error = lodepng::encode(filename, imageData, width, height, LCT_GREY, 8);
     if (error) {
         throw std::runtime_error("PNG encoder error saving " + filename + ": " +
                                  std::string(lodepng_error_text(error)));
     }
-     std::cout << "Saved grayscale image to " << filename << " (" << width << "x" << height << ")" << std::endl;
+    std::cout << "Saved grayscale image to " << filename << " (" << width << "x" << height << ")" << std::endl;
 }
 
 // Function to initialize OpenCL (keep as is)
@@ -193,7 +213,11 @@ bool initOpenCL(cl_platform_id& platform, cl_device_id& device,
         printDeviceInfo(device);
 
         // Create context
-        context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &error);
+        cl_context_properties contextProps[] = {
+            CL_CONTEXT_PLATFORM, (cl_context_properties)platform,
+            0 // Null terminator
+        };
+        context = clCreateContext(contextProps, 1, &device, nullptr, nullptr, &error);
         checkError(error, "Failed to create context");
 
         // Create command queue
@@ -208,23 +232,22 @@ bool initOpenCL(cl_platform_id& platform, cl_device_id& device,
     }
 }
 
-// Function to create input/output image objects (keep as is)
+// Function to create input/output image objects (modified slightly for clarity)
 bool createImageObjects(cl_context context,
                         unsigned in_width, unsigned in_height,   // Input dimensions
                         unsigned out_width, unsigned out_height, // Output dimensions (pre-calculated)
-                        const std::vector<unsigned char>& im0_data,
-                        const std::vector<unsigned char>& im1_data,
-                        cl_mem& im0_image, cl_mem& im1_image,
-                        cl_mem& im0_formated, cl_mem& im1_formated)
+                        const std::vector<unsigned char>& im0_data_rgba,
+                        const std::vector<unsigned char>& im1_data_rgba,
+                        cl_mem& im0_rgba_in, cl_mem& im1_rgba_in,          // Renamed for clarity
+                        cl_mem& im0_gray_out, cl_mem& im1_gray_out)        // Renamed for clarity
 {
-    // ... (implementation as before) ...
     cl_int error = CL_SUCCESS;
-    im0_image = im1_image = im0_formated = im1_formated = nullptr;
+    im0_rgba_in = im1_rgba_in = im0_gray_out = im1_gray_out = nullptr;
 
     try {
         // Image formats
-        const cl_image_format input_format = {CL_RGBA, CL_UNORM_INT8}; // Use UNORM_INT8 for read_imagef
-        const cl_image_format output_format = {CL_R, CL_UNSIGNED_INT8}; // Grayscale output (uchar)
+        const cl_image_format input_format = {CL_RGBA, CL_UNORM_INT8}; // Input RGBA
+        const cl_image_format output_format = {CL_R, CL_UNSIGNED_INT8}; // Output grayscale (uchar) - NOT normalized
 
         // Input image descriptor
         cl_image_desc input_desc = {};
@@ -233,16 +256,15 @@ bool createImageObjects(cl_context context,
         input_desc.image_height = in_height;
 
         // Create input images
-        // Use CL_MEM_COPY_HOST_PTR if data is ready, otherwise alloc and enqueue write later
-        im0_image = clCreateImage(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                  &input_format, &input_desc,
-                                  const_cast<unsigned char*>(im0_data.data()), &error);
-        checkError(error, "Failed to create input im0_image");
+        im0_rgba_in = clCreateImage(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                    &input_format, &input_desc,
+                                    const_cast<unsigned char*>(im0_data_rgba.data()), &error);
+        checkError(error, "Failed to create input im0_rgba_in");
 
-        im1_image = clCreateImage(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                  &input_format, &input_desc,
-                                  const_cast<unsigned char*>(im1_data.data()), &error);
-        checkError(error, "Failed to create input im1_image");
+        im1_rgba_in = clCreateImage(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                    &input_format, &input_desc,
+                                    const_cast<unsigned char*>(im1_data_rgba.data()), &error);
+        checkError(error, "Failed to create input im1_rgba_in");
 
         // Output image descriptor (using pre-calculated dimensions)
         cl_image_desc output_desc = {};
@@ -250,28 +272,28 @@ bool createImageObjects(cl_context context,
         output_desc.image_width = out_width;
         output_desc.image_height = out_height;
 
-        // Create output images (formatted grayscale)
-        // Use CL_MEM_WRITE_ONLY if only kernel writes, CL_MEM_READ_WRITE if reading back to host
-        im0_formated = clCreateImage(context, CL_MEM_READ_WRITE, // Kernel writes, host reads
+        // Create output grayscale images (Result of resize kernel, Input for ZNCC kernel)
+        // CL_MEM_READ_WRITE needed because ZNCC kernel reads from them, resize kernel writes.
+        im0_gray_out = clCreateImage(context, CL_MEM_READ_WRITE,
                                      &output_format, &output_desc,
                                      nullptr, &error);
-        checkError(error, "Failed to create output im0_formated");
+        checkError(error, "Failed to create output im0_gray_out");
 
-        im1_formated = clCreateImage(context, CL_MEM_READ_WRITE, // Kernel writes, host reads
+        im1_gray_out = clCreateImage(context, CL_MEM_READ_WRITE,
                                      &output_format, &output_desc,
                                      nullptr, &error);
-        checkError(error, "Failed to create output im1_formated");
+        checkError(error, "Failed to create output im1_gray_out");
 
         std::cout << "Created OpenCL image objects. Input: " << in_width << "x" << in_height
-                  << ", Formatted Output: " << out_width << "x" << out_height << std::endl;
+                  << ", Formatted Grayscale Output: " << out_width << "x" << out_height << std::endl;
         return true;
     }
     catch (const std::exception& e) {
         // Cleanup any created resources on failure
-        if (im0_image) clReleaseMemObject(im0_image);
-        if (im1_image) clReleaseMemObject(im1_image);
-        if (im0_formated) clReleaseMemObject(im0_formated);
-        if (im1_formated) clReleaseMemObject(im1_formated);
+        if (im0_rgba_in) clReleaseMemObject(im0_rgba_in);
+        if (im1_rgba_in) clReleaseMemObject(im1_rgba_in);
+        if (im0_gray_out) clReleaseMemObject(im0_gray_out);
+        if (im1_gray_out) clReleaseMemObject(im1_gray_out);
 
         std::cerr << "Image object creation failed: " << e.what() << std::endl;
         return false;
@@ -279,50 +301,80 @@ bool createImageObjects(cl_context context,
 }
 
 // Function to verify image objects by reading back a pixel (keep as is)
-void verifyImageObjects(cl_command_queue queue, cl_mem im0_image, unsigned width, unsigned height) {
-   // ... (implementation as before) ...
-    if (!im0_image) {
-        std::cerr << "Verification skipped: im0_image is null." << std::endl;
+void verifyImageObjects(cl_command_queue queue, cl_mem image_to_verify, unsigned width, unsigned height, const std::string& name) {
+   // ... (implementation as before, added name parameter) ...
+    if (!image_to_verify) {
+        std::cerr << "Verification skipped: "<< name << " is null." << std::endl;
         return;
     }
     if (width == 0 || height == 0) {
-         std::cerr << "Verification skipped: Invalid dimensions (0)." << std::endl;
+         std::cerr << "Verification skipped (" << name <<"): Invalid dimensions (0)." << std::endl;
          return;
     }
     try {
         cl_int error;
         size_t origin[3] = {0, 0, 0};
         size_t region[3] = {1, 1, 1};  // Read a single pixel
-        float pixel_data[4]; // Read as float4 because input format is UNORM_INT8
+
+        cl_image_format format;
+        error = clGetImageInfo(image_to_verify, CL_IMAGE_FORMAT, sizeof(format), &format, NULL);
+        checkError(error, "Failed to get image format for verification");
+
+        // Determine read buffer size and print format
+        std::vector<unsigned char> pixel_data_char;
+        std::vector<float> pixel_data_float;
+        void* read_ptr = nullptr;
+        std::string format_str = "";
+
+        if (format.image_channel_order == CL_R && format.image_channel_data_type == CL_UNSIGNED_INT8) {
+            pixel_data_char.resize(1);
+            read_ptr = pixel_data_char.data();
+            format_str = "CL_R, CL_UNSIGNED_INT8";
+        } else if (format.image_channel_order == CL_RGBA && format.image_channel_data_type == CL_UNORM_INT8) {
+            pixel_data_float.resize(4);
+            read_ptr = pixel_data_float.data();
+            format_str = "CL_RGBA, CL_UNORM_INT8 (read as float)";
+        } else {
+             std::cerr << "Verification skipped (" << name << "): Unsupported format for simple verification." << std::endl;
+             return;
+        }
+
 
         // Ensure commands are finished before reading
         error = clFinish(queue);
         checkError(error, "Failed to finish queue before verification read");
 
-        error = clEnqueueReadImage(queue, im0_image, CL_TRUE, origin, region, 0, 0,
-                                  pixel_data, 0, nullptr, nullptr);
-        checkError(error, "Failed to read from im0_image for verification");
+        error = clEnqueueReadImage(queue, image_to_verify, CL_TRUE, origin, region, 0, 0,
+                                  read_ptr, 0, nullptr, nullptr);
+        checkError(error, "Failed to read from " + name + " for verification");
 
-        // Convert float [0,1] back to approx uchar [0,255] for display
-        std::cout << "Verification: First pixel from im0_image (GPU, read as float): R=" << static_cast<int>(pixel_data[0] * 255.0f)
-                  << ", G=" << static_cast<int>(pixel_data[1] * 255.0f) << ", B=" << static_cast<int>(pixel_data[2] * 255.0f)
-                  << ", A=" << static_cast<int>(pixel_data[3] * 255.0f) << std::endl;
+        // Print pixel value
+        std::cout << "Verification: First pixel from " << name << " (GPU, format: " << format_str << "): ";
+        if (!pixel_data_char.empty()) { // Grayscale uchar
+            std::cout << "Value=" << static_cast<int>(pixel_data_char[0]) << std::endl;
+        } else if (!pixel_data_float.empty()) { // RGBA UNORM read as float
+             std::cout << "R=" << static_cast<int>(pixel_data_float[0] * 255.0f)
+                       << ", G=" << static_cast<int>(pixel_data_float[1] * 255.0f)
+                       << ", B=" << static_cast<int>(pixel_data_float[2] * 255.0f)
+                       << ", A=" << static_cast<int>(pixel_data_float[3] * 255.0f) << std::endl;
+        }
+
     }
     catch (const OpenCLException& e) {
-        std::cerr << "Verification failed: Could not read from im0_image: " << e.what() << std::endl;
+        std::cerr << "Verification failed (" << name << "): Could not read from image: " << e.what() << std::endl;
     }
      catch (const std::exception& e) {
-         std::cerr << "Verification failed (std::exception): " << e.what() << std::endl;
+         std::cerr << "Verification failed (" << name << ") (std::exception): " << e.what() << std::endl;
      }
 }
 
-// Cleanup function (keep as is)
+// Cleanup function (modified kernel arguments)
 void cleanup(cl_context context, cl_command_queue queue, cl_program program,
-             cl_kernel kernel1, cl_kernel kernel2, cl_kernel kernel3,
+             cl_kernel kernel1, cl_kernel kernel2, /* Removed kernel3 */
+             cl_sampler sampler, // Added sampler
              std::vector<cl_mem> buffers,
              std::vector<cl_mem> images)
 {
-    // ... (implementation as before) ...
     std::cout << "Cleaning up OpenCL resources..." << std::endl;
     cl_int err;
 
@@ -337,7 +389,9 @@ void cleanup(cl_context context, cl_command_queue queue, cl_program program,
     // Release kernels
     if (kernel1) clReleaseKernel(kernel1);
     if (kernel2) clReleaseKernel(kernel2);
-    if (kernel3) clReleaseKernel(kernel3);
+
+    // Release sampler
+    if (sampler) clReleaseSampler(sampler); // Release the sampler object
 
     // Release program
     if (program) clReleaseProgram(program);
@@ -388,6 +442,8 @@ cl_program createAndBuildProgram(cl_context context, cl_device_id device, const 
     std::cout << "Building OpenCL program..." << std::endl;
     // Add options useful for AMD iGPU, like relaxing math precision slightly if needed
     // Forcing CL 1.2 standard is often safe. Remove if issues arise.
+    // Enabling mad is generally good for performance in math-heavy kernels.
+    // -cl-kernel-arg-info might be needed on some platforms for reflection but not strictly required here.
     error = clBuildProgram(program, 1, &device, "-cl-std=CL1.2 -cl-single-precision-constant -cl-mad-enable", nullptr, nullptr);
     if (error != CL_SUCCESS) {
         // If build failed, get build log
@@ -408,33 +464,19 @@ cl_program createAndBuildProgram(cl_context context, cl_device_id device, const 
     return program;
 }
 
-// Function to create multiple kernels from one program (keep as is)
-bool createKernels(cl_program program,
-                   cl_kernel& kernel1, const char* name1,
-                   cl_kernel& kernel2, const char* name2,
-                   cl_kernel& kernel3, const char* name3)
+// Function to create a single kernel (modified slightly for clarity)
+bool createKernel(cl_program program, cl_kernel& kernel, const char* kernel_name)
 {
-    // ... (implementation as before) ...
     cl_int error;
-    kernel1 = kernel2 = kernel3 = nullptr;
-
+    kernel = nullptr;
     try {
-        kernel1 = clCreateKernel(program, name1, &error);
-        checkError(error, std::string("Failed to create kernel: ") + name1);
-
-        kernel2 = clCreateKernel(program, name2, &error);
-        checkError(error, std::string("Failed to create kernel: ") + name2);
-
-        kernel3 = clCreateKernel(program, name3, &error);
-        checkError(error, std::string("Failed to create kernel: ") + name3);
-
-        std::cout << "Kernels created: '" << name1 << "', '" << name2 << "', '" << name3 << "'" << std::endl;
+        kernel = clCreateKernel(program, kernel_name, &error);
+        checkError(error, std::string("Failed to create kernel: ") + kernel_name);
+        std::cout << "Kernel created: '" << kernel_name << "'" << std::endl;
         return true;
     } catch (const OpenCLException& e) {
-        std::cerr << "Kernel creation failed: " << e.what() << std::endl;
-        if (kernel1) clReleaseKernel(kernel1);
-        if (kernel2) clReleaseKernel(kernel2);
-        // kernel3 will be null if it failed
+        std::cerr << "Kernel creation failed for '" << kernel_name << "': " << e.what() << std::endl;
+        if (kernel) clReleaseKernel(kernel); // Should be null anyway, but belt-and-suspenders
         return false;
     }
 }
@@ -449,18 +491,19 @@ int main(int argc, char* argv[]) {
     const std::string output_dir = "../output/";
 
     // --- Resize/Filter Configuration ---
-    // Factor to resize by. >1.0 = Downscale, <1.0 = Upscale
-    const float resizeFactor = 4.0f;
-    // Radius for the Box Filter window (Radius 1 -> 3x3, Radius 2 -> 5x5 etc.)
-    const int boxFilterRadius = 1;
-
-    // --- Debug Configuration ---
-    const bool saveFormattedDebugImages = true; // Set to false to skip saving intermediate images
+    const float resizeFactor = 4.0f; // Factor to resize by. >1.0 = Downscale
+    const int boxFilterRadius = 2;   // Radius for the Box Filter window (Radius 2 -> 5x5)
 
     // --- ZNCC Configuration ---
-    const int win_size = 4;    // Half-width of the ZNCC window (e.g., 4 for a 9x9 window)
-    const int max_disp = 260;   // Maximum disparity to search
-    // ---------------------
+    const int ZNCC_WIN_SIZE = 9;    // Full side length of the ZNCC window (MUST BE ODD)
+    const int MAX_DISP = 64;        // Maximum disparity (0..MAX_DISP-1). Must be <= 256 for uchar output.
+    static_assert(ZNCC_WIN_SIZE % 2 != 0, "ZNCC_WIN_SIZE must be odd.");
+    static_assert(MAX_DISP > 0 && MAX_DISP <= 256, "MAX_DISP must be between 1 and 256 (inclusive).");
+
+    // --- Debug Configuration ---
+    const bool saveFormattedDebugImages = true; // Save intermediate grayscale images
+    const bool verifyInputImages = true; // Read back first pixel of input images
+    const bool verifyFormattedImages = true; // Read back first pixel of grayscale images
 
     // Variables for image data
     std::vector<unsigned char> im0_data_rgba, im1_data_rgba;
@@ -474,26 +517,20 @@ int main(int argc, char* argv[]) {
     cl_context context = nullptr;
     cl_command_queue queue = nullptr;
     cl_program program = nullptr;
+    cl_sampler sampler = nullptr; // Sampler for ZNCC kernel
 
-    // Kernels (Using Box Filter kernel)
-    cl_kernel resizeGrayscaleBoxKernel = nullptr; // Specific name
-    cl_kernel precomputeStatsKernel = nullptr;
-    cl_kernel computeDisparityKernel = nullptr;
+    // Kernels
+    cl_kernel resizeGrayscaleBoxKernel = nullptr;
+    cl_kernel znccKernel = nullptr; // Renamed ZNCC kernel handle
 
     // OpenCL Memory Objects (Images)
-    cl_mem im0_image_rgba = nullptr; // Input RGBA (UNORM_INT8)
-    cl_mem im1_image_rgba = nullptr; // Input RGBA (UNORM_INT8)
-    cl_mem im0_formated_uchar = nullptr; // Output of resize (uchar grayscale R)
-    cl_mem im1_formated_uchar = nullptr; // Output of resize (uchar grayscale R)
+    cl_mem im0_image_rgba = nullptr;     // Input RGBA (UNORM_INT8)
+    cl_mem im1_image_rgba = nullptr;     // Input RGBA (UNORM_INT8)
+    cl_mem im0_formated_uchar = nullptr; // Output of resize (uchar grayscale R), Input for ZNCC
+    cl_mem im1_formated_uchar = nullptr; // Output of resize (uchar grayscale R), Input for ZNCC
 
     // OpenCL Memory Objects (Buffers)
-    cl_mem left_float_buf = nullptr;   // Input for ZNCC (float grayscale)
-    cl_mem right_float_buf = nullptr;  // Input for ZNCC (float grayscale)
-    cl_mem left_means_buf = nullptr;
-    cl_mem left_stddevs_buf = nullptr;
-    cl_mem right_means_buf = nullptr;
-    cl_mem right_stddevs_buf = nullptr;
-    cl_mem disparity_buf = nullptr;     // Final output buffer
+    cl_mem disparity_buf = nullptr;      // Final output buffer (uchar)
 
     // Keep track of resources for cleanup
     std::vector<cl_mem> cl_buffers;
@@ -527,42 +564,43 @@ int main(int argc, char* argv[]) {
              throw std::runtime_error("Failed to create or build program.");
         }
 
-        // *** Hardcode the Box Filter kernel name ***
+        // Kernel names (ensure these match the names inside kernels.cl)
         const char* resizeKernelName = "resizeGrayscaleBoxFilter";
-        std::cout << "Using resize/grayscale kernel: " << resizeKernelName << std::endl;
-        std::cout << "Using Box Filter Radius: " << boxFilterRadius << " (" << (2*boxFilterRadius+1) << "x" << (2*boxFilterRadius+1) << ")" << std::endl;
+        const char* znccKernelName = "zncc_stereo_match"; // Use the correct name from your kernel file
 
-
-        // Create all kernel objects from the program
-        if (!createKernels(program,
-                           resizeGrayscaleBoxKernel, resizeKernelName, // Use the hardcoded name
-                           precomputeStatsKernel, "precompute_window_stats",
-                           computeDisparityKernel, "compute_disparity_zncc"))
-        {
-            throw std::runtime_error("Failed to create one or more kernels.");
+        std::cout << "Creating kernels..." << std::endl;
+        if (!createKernel(program, resizeGrayscaleBoxKernel, resizeKernelName)) {
+             throw std::runtime_error("Failed to create resize kernel.");
         }
+        if (!createKernel(program, znccKernel, znccKernelName)) {
+             throw std::runtime_error("Failed to create ZNCC kernel.");
+        }
+        std::cout << "Using Resize/Grayscale Kernel: " << resizeKernelName << std::endl;
+        std::cout << "Using ZNCC Kernel: " << znccKernelName << std::endl;
+        std::cout << "Using Box Filter Radius: " << boxFilterRadius << " (" << (2 * boxFilterRadius + 1) << "x" << (2 * boxFilterRadius + 1) << ")" << std::endl;
+        std::cout << "Using ZNCC Window Size: " << ZNCC_WIN_SIZE << "x" << ZNCC_WIN_SIZE << std::endl;
+        std::cout << "Using Max Disparity: " << MAX_DISP << std::endl;
 
-
-        // --- 4. Calculate Output Dimensions & Create Image Objects ---
-        std::cout << "\n--- Creating OpenCL Images ---" << std::endl;
+        // --- 4. Calculate Output Dimensions & Create Resources ---
+        std::cout << "\n--- Creating OpenCL Resources (Images, Sampler, Buffers) ---" << std::endl;
         if (resizeFactor <= 0.0f) {
             throw std::runtime_error("Resize factor must be positive.");
         }
         // Calculate output dimensions based on resize factor
         unsigned out_width = static_cast<unsigned>(std::round(static_cast<float>(width) / resizeFactor));
         unsigned out_height = static_cast<unsigned>(std::round(static_cast<float>(height) / resizeFactor));
-        // Ensure minimum size of 1x1
-        out_width = std::max(1u, out_width);
+        out_width = std::max(1u, out_width); // Ensure minimum size of 1x1
         out_height = std::max(1u, out_height);
         std::cout << "Input dimensions: " << width << "x" << height << std::endl;
         std::cout << "Calculated output dimensions: " << out_width << "x" << out_height
                   << " (Resize Factor: " << resizeFactor << ")" << std::endl;
 
-
-        if (!createImageObjects(context, width, height, out_width, out_height, // Pass calculated dims
+        // Create Image Objects
+        if (!createImageObjects(context, width, height, out_width, out_height,
                                 im0_data_rgba, im1_data_rgba,
-                                im0_image_rgba, im1_image_rgba,
-                                im0_formated_uchar, im1_formated_uchar)) {
+                                im0_image_rgba, im1_image_rgba, // Input RGBA
+                                im0_formated_uchar, im1_formated_uchar)) // Output Grayscale
+        {
             throw std::runtime_error("Failed to create OpenCL image objects.");
         }
         cl_images.push_back(im0_image_rgba);
@@ -571,38 +609,54 @@ int main(int argc, char* argv[]) {
         cl_images.push_back(im1_formated_uchar);
 
         // Verify input image objects (optional but good)
-        // verifyImageObjects(queue, im0_image_rgba, width, height);
+        if(verifyInputImages) {
+            verifyImageObjects(queue, im0_image_rgba, width, height, "im0_image_rgba");
+        }
+
+        // Create Sampler for ZNCC kernel
+        cl_sampler_properties samplerProps[] = {
+            CL_SAMPLER_NORMALIZED_COORDS, CL_FALSE, // Use pixel coordinates
+            CL_SAMPLER_ADDRESSING_MODE, CL_ADDRESS_CLAMP_TO_EDGE, // Handle boundaries
+            CL_SAMPLER_FILTER_MODE, CL_FILTER_NEAREST, // Simple filter
+            0 // Terminator
+        };
+        sampler = clCreateSamplerWithProperties(context, samplerProps, &err);
+        checkError(err, "Failed to create sampler");
+        std::cout << "Created sampler." << std::endl;
+
+        // Create Disparity Output Buffer
+        size_t disparity_image_size_pixels = static_cast<size_t>(out_width) * out_height;
+        size_t disparity_buffer_size_bytes = disparity_image_size_pixels * sizeof(unsigned char);
+        disparity_buf = clCreateBuffer(context, CL_MEM_WRITE_ONLY, // Kernel only writes
+                                       disparity_buffer_size_bytes, nullptr, &err);
+        checkError(err, "Creating disparity buffer");
+        cl_buffers.push_back(disparity_buf); // Add buffer to cleanup list
+        std::cout << "Created disparity output buffer (" << out_width << "x" << out_height << ", uchar)." << std::endl;
+
 
         // --- 5. Execute Resize & Grayscale Kernel (Box Filter) ---
-        std::cout << "\n--- Executing Resize/Grayscale Kernel (Box Filter) ---" << std::endl;
+        std::cout << "\n--- Executing Resize/Grayscale Kernel ---" << std::endl;
         auto stage_start_time = std::chrono::high_resolution_clock::now();
 
-        // *** Global size is the size of the OUTPUT image ***
-        size_t globalSizeResize[2] = {out_width, out_height};
-
-        cl_int err_arg = 0; // Accumulate errors for clSetKernelArg
+        size_t globalSizeResize[2] = {out_width, out_height}; // Global size = output size
+        cl_int err_arg = 0;
 
         // --- Run for im0 ---
-        // Args: input_image, output_image, resizeFactor, windowRadius
-        err_arg |= clSetKernelArg(resizeGrayscaleBoxKernel, 0, sizeof(cl_mem), &im0_image_rgba);
-        err_arg |= clSetKernelArg(resizeGrayscaleBoxKernel, 1, sizeof(cl_mem), &im0_formated_uchar);
+        err_arg |= clSetKernelArg(resizeGrayscaleBoxKernel, 0, sizeof(cl_mem), &im0_image_rgba);     // Input RGBA
+        err_arg |= clSetKernelArg(resizeGrayscaleBoxKernel, 1, sizeof(cl_mem), &im0_formated_uchar); // Output Grayscale
         err_arg |= clSetKernelArg(resizeGrayscaleBoxKernel, 2, sizeof(cl_float), &resizeFactor);
-        err_arg |= clSetKernelArg(resizeGrayscaleBoxKernel, 3, sizeof(cl_int), &boxFilterRadius); // Always set radius
-        checkError(err_arg, "Setting resize (box filter) kernel arguments for im0");
-
+        err_arg |= clSetKernelArg(resizeGrayscaleBoxKernel, 3, sizeof(cl_int), &boxFilterRadius);
+        checkError(err_arg, "Setting resize kernel arguments for im0");
 
         err = clEnqueueNDRangeKernel(queue, resizeGrayscaleBoxKernel, 2, NULL,
-                                     globalSizeResize, NULL, // Use default local size
-                                     0, NULL, NULL);
+                                     globalSizeResize, NULL, 0, NULL, NULL);
         checkError(err, "Enqueueing resize kernel for im0");
 
         // --- Run for im1 ---
-        // Reuse args 2 and 3 (factor, radius), just change images (args 0, 1)
         err_arg = 0;
-        err_arg |= clSetKernelArg(resizeGrayscaleBoxKernel, 0, sizeof(cl_mem), &im1_image_rgba); // Change input
+        err_arg |= clSetKernelArg(resizeGrayscaleBoxKernel, 0, sizeof(cl_mem), &im1_image_rgba);     // Change input
         err_arg |= clSetKernelArg(resizeGrayscaleBoxKernel, 1, sizeof(cl_mem), &im1_formated_uchar); // Change output
-        checkError(err_arg, "Re-setting resize (box filter) image kernel arguments for im1");
-
+        checkError(err_arg, "Re-setting resize kernel image arguments for im1");
 
         err = clEnqueueNDRangeKernel(queue, resizeGrayscaleBoxKernel, 2, NULL,
                                      globalSizeResize, NULL, 0, NULL, NULL);
@@ -616,203 +670,115 @@ int main(int argc, char* argv[]) {
         timings_ms.push_back(std::chrono::duration<double, std::milli>(stage_end_time - stage_start_time).count());
         std::cout << "Resize/Grayscale kernels finished in " << timings_ms.back() << " ms." << std::endl;
 
+        // --- [Optional] Verify and Save Intermediate Grayscale Images ---
+        if (verifyFormattedImages || saveFormattedDebugImages) {
+             std::cout << "\n--- Processing Intermediate Grayscale Images ---" << std::endl;
+             if (verifyFormattedImages) {
+                // Verify the output of the resize kernel
+                verifyImageObjects(queue, im0_formated_uchar, out_width, out_height, "im0_formated_uchar");
+             }
+             if (saveFormattedDebugImages) {
+                 // Read back the formatted images *only if* saving them
+                 std::vector<unsigned char> im0_formatted_host(disparity_image_size_pixels);
+                 std::vector<unsigned char> im1_formatted_host(disparity_image_size_pixels);
+                 size_t origin[3] = {0, 0, 0};
+                 size_t region[3] = {out_width, out_height, 1};
 
-        // --- 6. Read Back Formatted Images and Convert to Float Buffers ---
-        std::cout << "\n--- Reading Formatted Images & Creating Float Buffers ---" << std::endl;
-        stage_start_time = std::chrono::high_resolution_clock::now();
+                 err = clEnqueueReadImage(queue, im0_formated_uchar, CL_TRUE, origin, region, 0, 0,
+                                          im0_formatted_host.data(), 0, NULL, NULL);
+                 checkError(err, "Reading formatted image 0 for debug saving");
+                 err = clEnqueueReadImage(queue, im1_formated_uchar, CL_TRUE, origin, region, 0, 0,
+                                          im1_formatted_host.data(), 0, NULL, NULL);
+                 checkError(err, "Reading formatted image 1 for debug saving");
 
-        size_t formatted_image_size_pixels = static_cast<size_t>(out_width) * out_height;
-        size_t formatted_image_size_bytes = formatted_image_size_pixels * sizeof(unsigned char); // 1 byte per pixel (CL_R)
-
-        std::vector<unsigned char> im0_formatted_host(formatted_image_size_pixels);
-        std::vector<unsigned char> im1_formatted_host(formatted_image_size_pixels);
-
-        size_t origin[3] = {0, 0, 0};
-        size_t region[3] = {out_width, out_height, 1}; // Region matches output image dims
-
-        // Read im0_formated_uchar
-        err = clEnqueueReadImage(queue, im0_formated_uchar, CL_TRUE, // Blocking read
-                                 origin, region, 0, 0, // row_pitch and slice_pitch are 0 for 2D
-                                 im0_formatted_host.data(), 0, NULL, NULL);
-        checkError(err, "Reading formatted image 0 back to host");
-
-        // Read im1_formated_uchar
-        err = clEnqueueReadImage(queue, im1_formated_uchar, CL_TRUE, // Blocking read
-                                 origin, region, 0, 0,
-                                 im1_formatted_host.data(), 0, NULL, NULL);
-        checkError(err, "Reading formatted image 1 back to host");
-
-        // *** Conditionally save intermediate formatted images ***
-        if (saveFormattedDebugImages) {
-            std::cout << "Saving debug formatted images..." << std::endl;
-            saveGrayscalePNG(output_dir + "im0_formated_debug.png", im0_formatted_host, out_width, out_height);
-            saveGrayscalePNG(output_dir + "im1_formated_debug.png", im1_formatted_host, out_width, out_height);
-        } else {
-             std::cout << "Skipping saving of debug formatted images." << std::endl;
+                 saveGrayscalePNG(output_dir + "im0_formated_debug.png", im0_formatted_host, out_width, out_height);
+                 saveGrayscalePNG(output_dir + "im1_formated_debug.png", im1_formatted_host, out_width, out_height);
+             }
         }
 
 
-        // Convert uchar [0,255] to float [0.0, 255.0] on host for ZNCC kernel
-        std::vector<float> left_float_host(formatted_image_size_pixels);
-        std::vector<float> right_float_host(formatted_image_size_pixels);
-        for (size_t i = 0; i < formatted_image_size_pixels; ++i) {
-            left_float_host[i] = static_cast<float>(im0_formatted_host[i]);
-            right_float_host[i] = static_cast<float>(im1_formatted_host[i]);
-        }
-
-        // Create float buffers on device and copy data
-        size_t float_buffer_size_bytes = formatted_image_size_pixels * sizeof(float);
-        left_float_buf = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                        float_buffer_size_bytes, left_float_host.data(), &err);
-        checkError(err, "Creating left float buffer");
-        cl_buffers.push_back(left_float_buf);
-
-        right_float_buf = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                         float_buffer_size_bytes, right_float_host.data(), &err);
-        checkError(err, "Creating right float buffer");
-        cl_buffers.push_back(right_float_buf);
-        std::cout << "Float buffers created and populated." << std::endl;
-
-        stage_end_time = std::chrono::high_resolution_clock::now();
-        timings_ms.push_back(std::chrono::duration<double, std::milli>(stage_end_time - stage_start_time).count());
-        std::cout << "Readback and Float Buffer creation finished in " << timings_ms.back() << " ms." << std::endl;
-
-        // --- 7. Execute Precompute Stats Kernel ---
-        std::cout << "\n--- Executing Precompute Stats Kernel ---" << std::endl;
-        stage_start_time = std::chrono::high_resolution_clock::now();
-
-        // Create buffers for means and stddevs (size matches float buffers)
-        left_means_buf = clCreateBuffer(context, CL_MEM_READ_WRITE, float_buffer_size_bytes, nullptr, &err);
-        checkError(err, "Creating left means buffer");
-        cl_buffers.push_back(left_means_buf);
-
-        left_stddevs_buf = clCreateBuffer(context, CL_MEM_READ_WRITE, float_buffer_size_bytes, nullptr, &err);
-        checkError(err, "Creating left stddevs buffer");
-        cl_buffers.push_back(left_stddevs_buf);
-
-        right_means_buf = clCreateBuffer(context, CL_MEM_READ_WRITE, float_buffer_size_bytes, nullptr, &err);
-        checkError(err, "Creating right means buffer");
-        cl_buffers.push_back(right_means_buf);
-
-        right_stddevs_buf = clCreateBuffer(context, CL_MEM_READ_WRITE, float_buffer_size_bytes, nullptr, &err);
-        checkError(err, "Creating right stddevs buffer");
-        cl_buffers.push_back(right_stddevs_buf);
-
-        // Global size for ZNCC steps (matches the formatted/float image dimensions)
-        size_t globalSizeZNCC[2] = {out_width, out_height};
-
-        // --- Run precompute for Left image ---
-        // Args: input_float, means_out, stddevs_out, width, height, win_hsize
-        err = clSetKernelArg(precomputeStatsKernel, 0, sizeof(cl_mem), &left_float_buf);
-        err |= clSetKernelArg(precomputeStatsKernel, 1, sizeof(cl_mem), &left_means_buf);
-        err |= clSetKernelArg(precomputeStatsKernel, 2, sizeof(cl_mem), &left_stddevs_buf);
-        err |= clSetKernelArg(precomputeStatsKernel, 3, sizeof(int), &out_width); // Use output width
-        err |= clSetKernelArg(precomputeStatsKernel, 4, sizeof(int), &out_height); // Use output height
-        err |= clSetKernelArg(precomputeStatsKernel, 5, sizeof(int), &win_size);
-        checkError(err, "Setting precompute kernel args for left");
-        err = clEnqueueNDRangeKernel(queue, precomputeStatsKernel, 2, NULL,
-                                     globalSizeZNCC, NULL, 0, NULL, NULL);
-        checkError(err, "Enqueueing precompute kernel for left");
-
-        // --- Run precompute for Right image ---
-        err = clSetKernelArg(precomputeStatsKernel, 0, sizeof(cl_mem), &right_float_buf); // Change input
-        err |= clSetKernelArg(precomputeStatsKernel, 1, sizeof(cl_mem), &right_means_buf); // Change mean output
-        err |= clSetKernelArg(precomputeStatsKernel, 2, sizeof(cl_mem), &right_stddevs_buf); // Change stddev output
-        // Args 3, 4, 5 (dims, win_size) are the same
-        checkError(err, "Setting precompute kernel args for right");
-        err = clEnqueueNDRangeKernel(queue, precomputeStatsKernel, 2, NULL,
-                                     globalSizeZNCC, NULL, 0, NULL, NULL);
-        checkError(err, "Enqueueing precompute kernel for right");
-
-        // Wait for precomputation to finish
-        err = clFinish(queue);
-        checkError(err, "Waiting for precompute kernels to finish");
-
-        stage_end_time = std::chrono::high_resolution_clock::now();
-        timings_ms.push_back(std::chrono::duration<double, std::milli>(stage_end_time - stage_start_time).count());
-        std::cout << "Precompute Stats kernels finished in " << timings_ms.back() << " ms." << std::endl;
-
-
-        // --- 8. Execute Compute Disparity (ZNCC) Kernel ---
+        // --- 6. Execute Compute Disparity (ZNCC) Kernel ---
+        // Note: Steps for reading back uchar, converting to float, creating float buffers,
+        // and precomputing stats are REMOVED.
         std::cout << "\n--- Executing Compute Disparity (ZNCC) Kernel ---" << std::endl;
         stage_start_time = std::chrono::high_resolution_clock::now();
 
-        // Create disparity output buffer (uchar, size matches formatted image)
-        size_t disparity_buffer_size_bytes = formatted_image_size_pixels * sizeof(unsigned char);
-        disparity_buf = clCreateBuffer(context, CL_MEM_WRITE_ONLY, disparity_buffer_size_bytes, nullptr, &err);
-        checkError(err, "Creating disparity buffer");
-        cl_buffers.push_back(disparity_buf);
+        size_t globalSizeZNCC[2] = {out_width, out_height}; // Global size matches formatted image dims
 
-        // Set arguments for ZNCC kernel
-        // Args: left_float, right_float, left_means, left_stddevs, right_means, right_stddevs, disparity_out, width, height, win_hsize, max_disp
-        err = clSetKernelArg(computeDisparityKernel, 0, sizeof(cl_mem), &left_float_buf);
-        err |= clSetKernelArg(computeDisparityKernel, 1, sizeof(cl_mem), &right_float_buf);
-        err |= clSetKernelArg(computeDisparityKernel, 2, sizeof(cl_mem), &left_means_buf);
-        err |= clSetKernelArg(computeDisparityKernel, 3, sizeof(cl_mem), &left_stddevs_buf);
-        err |= clSetKernelArg(computeDisparityKernel, 4, sizeof(cl_mem), &right_means_buf);
-        err |= clSetKernelArg(computeDisparityKernel, 5, sizeof(cl_mem), &right_stddevs_buf);
-        err |= clSetKernelArg(computeDisparityKernel, 6, sizeof(cl_mem), &disparity_buf);
-        err |= clSetKernelArg(computeDisparityKernel, 7, sizeof(int), &out_width); // Use output width
-        err |= clSetKernelArg(computeDisparityKernel, 8, sizeof(int), &out_height); // Use output height
-        err |= clSetKernelArg(computeDisparityKernel, 9, sizeof(int), &win_size);
-        err |= clSetKernelArg(computeDisparityKernel, 10, sizeof(int), &max_disp);
-        checkError(err, "Setting compute disparity kernel args");
+        // Set arguments for the *new* ZNCC kernel
+        // Args: left_image, right_image, disparity_map, width, height, WIN_SIZE, MAX_DISP, sampler
+        err_arg = 0;
+        err_arg |= clSetKernelArg(znccKernel, 0, sizeof(cl_mem), &im0_formated_uchar); // Input Left Grayscale Image
+        err_arg |= clSetKernelArg(znccKernel, 1, sizeof(cl_mem), &im1_formated_uchar); // Input Right Grayscale Image
+        err_arg |= clSetKernelArg(znccKernel, 2, sizeof(cl_mem), &disparity_buf);     // Output Disparity Buffer (uchar)
+        err_arg |= clSetKernelArg(znccKernel, 3, sizeof(int), &out_width);            // Image Width
+        err_arg |= clSetKernelArg(znccKernel, 4, sizeof(int), &out_height);           // Image Height
+        err_arg |= clSetKernelArg(znccKernel, 5, sizeof(int), &ZNCC_WIN_SIZE);        // ZNCC Window Full Size (e.g., 9)
+        err_arg |= clSetKernelArg(znccKernel, 6, sizeof(int), &MAX_DISP);             // Max Disparity (e.g., 64)
+        err_arg |= clSetKernelArg(znccKernel, 7, sizeof(cl_sampler), &sampler);       // Sampler object
+        checkError(err_arg, "Setting ZNCC kernel arguments");
 
         // Enqueue ZNCC kernel
-        err = clEnqueueNDRangeKernel(queue, computeDisparityKernel, 2, NULL,
-                                     globalSizeZNCC, NULL, 0, NULL, NULL);
-        checkError(err, "Enqueueing compute disparity kernel");
+        err = clEnqueueNDRangeKernel(queue, znccKernel, 2, NULL,
+                                     globalSizeZNCC, NULL, // Let OpenCL choose local size for now
+                                     0, NULL, NULL);
+        checkError(err, "Enqueueing ZNCC kernel");
 
         // Wait for ZNCC kernel to finish
         err = clFinish(queue);
-        checkError(err, "Waiting for compute disparity kernel to finish");
+        checkError(err, "Waiting for ZNCC kernel to finish");
 
         stage_end_time = std::chrono::high_resolution_clock::now();
-        timings_ms.push_back(std::chrono::duration<double, std::milli>(stage_end_time - stage_start_time).count());
+        timings_ms.push_back(std::chrono::duration<double, std::milli>(stage_end_time - stage_start_time).count()); // Index 1
         std::cout << "Compute Disparity (ZNCC) kernel finished in " << timings_ms.back() << " ms." << std::endl;
 
 
-        // --- 9. Read Final Disparity Map ---
+        // --- 7. Read Final Disparity Map ---
         std::cout << "\n--- Reading Final Disparity Map ---" << std::endl;
         stage_start_time = std::chrono::high_resolution_clock::now();
 
-        std::vector<unsigned char> disparity_map_host(formatted_image_size_pixels);
+        std::vector<unsigned char> disparity_map_host(disparity_image_size_pixels);
         err = clEnqueueReadBuffer(queue, disparity_buf, CL_TRUE, // Blocking read
                                   0, disparity_buffer_size_bytes,
                                   disparity_map_host.data(), 0, NULL, NULL);
         checkError(err, "Reading disparity map buffer back to host");
 
         stage_end_time = std::chrono::high_resolution_clock::now();
-        timings_ms.push_back(std::chrono::duration<double, std::milli>(stage_end_time - stage_start_time).count());
+        timings_ms.push_back(std::chrono::duration<double, std::milli>(stage_end_time - stage_start_time).count()); // Index 2
         std::cout << "Disparity Readback finished in " << timings_ms.back() << " ms." << std::endl;
 
-        // --- 10. Save Disparity Map ---
+        // --- 8. Save Disparity Map ---
         std::cout << "\n--- Saving Output ---" << std::endl;
         saveGrayscalePNG(output_dir + "disparity_map_ocl.png", disparity_map_host, out_width, out_height);
 
-        // --- 11. Cleanup ---
+        // --- 9. Cleanup ---
         std::cout << "\n--- Cleaning Up ---" << std::endl;
         stage_start_time = std::chrono::high_resolution_clock::now();
+        // Update cleanup call: only two kernels now, add sampler
         cleanup(context, queue, program,
-                resizeGrayscaleBoxKernel, precomputeStatsKernel, computeDisparityKernel, // Use specific kernel handle
+                resizeGrayscaleBoxKernel, znccKernel, // Pass the correct kernel handles
+                sampler, // Pass the sampler handle
                 cl_buffers, cl_images);
+        // Nullify handles after release (good practice)
+        resizeGrayscaleBoxKernel = nullptr; znccKernel = nullptr; sampler = nullptr;
+        context = nullptr; queue = nullptr; program = nullptr;
+        cl_buffers.clear(); cl_images.clear();
+
         stage_end_time = std::chrono::high_resolution_clock::now();
-        timings_ms.push_back(std::chrono::duration<double, std::milli>(stage_end_time - stage_start_time).count());
+        timings_ms.push_back(std::chrono::duration<double, std::milli>(stage_end_time - stage_start_time).count()); // Index 3
 
 
-        // --- Calculate Total Time ---
+        // --- Calculate Total Time & Summary ---
          auto total_end_time = std::chrono::high_resolution_clock::now();
          double total_duration_ms = std::chrono::duration<double, std::milli>(total_end_time - total_start_time).count();
-         // Sum kernel execution + readback times (indices 0, 2, 3, 4 in timings_ms)
-         double gpu_plus_readback_ms = timings_ms[0] + timings_ms[2] + timings_ms[3] + timings_ms[4];
+         // Sum relevant GPU + readback times (indices 0, 1, 2 in timings_ms)
+         double gpu_plus_readback_ms = timings_ms[0] + timings_ms[1] + timings_ms[2];
 
          std::cout << "\n-------------------- Summary --------------------" << std::endl;
          std::cout << "Resize/Grayscale Kernel : " << timings_ms[0] << " ms" << std::endl;
-         std::cout << "Readback & Float Buf Prep: " << timings_ms[1] << " ms" << std::endl;
-         std::cout << "Precompute Stats Kernel : " << timings_ms[2] << " ms" << std::endl;
-         std::cout << "Compute Disparity Kernel: " << timings_ms[3] << " ms" << std::endl;
-         std::cout << "Disparity Readback      : " << timings_ms[4] << " ms" << std::endl;
-         std::cout << "Cleanup                 : " << timings_ms[5] << " ms" << std::endl;
+         std::cout << "Compute Disparity Kernel: " << timings_ms[1] << " ms" << std::endl; // ZNCC kernel time
+         std::cout << "Disparity Readback      : " << timings_ms[2] << " ms" << std::endl;
+         std::cout << "Cleanup                 : " << timings_ms[3] << " ms" << std::endl;
          std::cout << "-------------------------------------------------" << std::endl;
          std::cout << "Total GPU execution + Readback Time: " << gpu_plus_readback_ms << " ms" << std::endl;
          std::cout << "Total Application Time (incl. I/O, setup): " << total_duration_ms << " ms" << std::endl;
@@ -825,15 +791,15 @@ int main(int argc, char* argv[]) {
         std::cerr << "\n\n!--- OpenCL Error ---!\nMessage: " << e.what() << "\nError Code: " << e.getErrorCode() << std::endl;
         // Ensure cleanup is attempted even on error
         cleanup(context, queue, program,
-                resizeGrayscaleBoxKernel, precomputeStatsKernel, computeDisparityKernel, // Use specific kernel handle
+                resizeGrayscaleBoxKernel, znccKernel, sampler,
                 cl_buffers, cl_images);
         return 1;
     }
     catch (const std::exception& e) {
         std::cerr << "\n\n!--- Standard Error ---!\nMessage: " << e.what() << std::endl;
         // Ensure cleanup is attempted even on error
-        cleanup(context, queue, program,
-                resizeGrayscaleBoxKernel, precomputeStatsKernel, computeDisparityKernel, // Use specific kernel handle
+         cleanup(context, queue, program,
+                resizeGrayscaleBoxKernel, znccKernel, sampler,
                 cl_buffers, cl_images);
         return 1;
     }

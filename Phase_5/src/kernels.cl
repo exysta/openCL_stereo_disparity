@@ -47,7 +47,7 @@ __kernel void resizeGrayscaleBoxFilter(
             float4 input_pixel = read_imagef(input_image, sampler, (float2)(sample_x, sample_y));
 
             // Convert the sampled pixel to grayscale (Luminance)
-            float gray_sample = dot(input_pixel.xyz, (float3)(0.299f, 0.587f, 0.114f));
+            float gray_sample = dot(input_pixel.xyz, (float3)(0.2126f, 0.7152f, 0.0722f));
 
             // Accumulate the grayscale value
             accumulated_gray += gray_sample;
@@ -68,171 +68,98 @@ __kernel void resizeGrayscaleBoxFilter(
     // write_imageui(output_image, (int2)(out_x, out_y), (uint4)(final_gray_value_uchar, final_gray_value_uchar, final_gray_value_uchar, 255));
 }
 
-// Kernel to precompute mean and standard deviation for windows
-__kernel void precompute_window_stats(
-    __global const float* input_image, // Input grayscale image data (float)
-    __global float* output_means,      // Output buffer for means
-    __global float* output_stddevs,    // Output buffer for standard deviations
-    int width,
-    int height,
-    int win_hsize                    // Half-size of the window (win_size from C++)
-) {
-    int x = get_global_id(0);
-    int y = get_global_id(1);
+__kernel void zncc_stereo_match(
+    __read_only image2d_t left_image,       // Format: CL_R, CL_UNSIGNED_INT8
+    __read_only image2d_t right_image,      // Format: CL_R, CL_UNSIGNED_INT8
+    __global uchar* disparity_map,
+    const int width,
+    const int height,
+    const int WIN_SIZE,
+    const int MAX_DISP,
+    const sampler_t sampler)
+{
+    const int i = get_global_id(0);
+    const int j = get_global_id(1);
 
-    if (x >= width || y >= height) {
-        return; // Out of bounds
-    }
-
-    float sum = 0.0f;
-    float sumSq = 0.0f;
-    int count = 0;
-
-    // Calculate window boundaries, clamping to image edges
-    int win_start_y = max(0, y - win_hsize);
-    int win_end_y   = min(height - 1, y + win_hsize);
-    int win_start_x = max(0, x - win_hsize);
-    int win_end_x   = min(width - 1, x + win_hsize);
-
-    // Iterate over the window
-    for (int wy = win_start_y; wy <= win_end_y; wy++) {
-        for (int wx = win_start_x; wx <= win_end_x; wx++) {
-            float val = input_image[wy * width + wx];
-            sum += val;
-            sumSq += val * val;
-            count++;
-        }
-    }
-
-    // Calculate mean and standard deviation
-    // Add epsilon to count to prevent division by zero if window somehow has 0 pixels (shouldn't happen with proper bounds)
-    float mean = 0.0f;
-    float stdDev = 0.0f;
-    float fCount = (float)count; // Use float for division
-
-    if (fCount > 0.0f) {
-        mean = sum / fCount;
-        // Prevent negative variance due to floating point errors
-        float variance = max(0.0f, (sumSq / fCount) - (mean * mean));
-        stdDev = sqrt(variance);
-    }
-
-    // Write results to output buffers
-    int index = y * width + x;
-    output_means[index] = mean;
-    output_stddevs[index] = stdDev;
-}
-
-// Kernel to compute disparity using ZNCC
-__kernel void compute_disparity_zncc(
-    __global const float* left_image,    // Left grayscale image data (float)
-    __global const float* right_image,   // Right grayscale image data (float)
-    __global const float* left_means,    // Precomputed means for left image
-    __global const float* left_stddevs,  // Precomputed stddevs for left image
-    __global const float* right_means,   // Precomputed means for right image
-    __global const float* right_stddevs, // Precomputed stddevs for right image
-    __global uchar* output_disparity,   // Output disparity map (uchar 0-255)
-    int width,
-    int height,
-    int win_hsize,                     // Half-size of the window
-    int max_disp                       // Maximum disparity to check
-) {
-    int x = get_global_id(0); // x coordinate in the left image
-    int y = get_global_id(1); // y coordinate in the left image
-
-    if (x >= width || y >= height) {
-        return; // Out of bounds
-    }
-
-    int indexL = y * width + x;
-    float meanL = left_means[indexL];
-    float stdDevL = left_stddevs[indexL];
-
-    // Skip calculation if the left window standard deviation is too small (textureless)
-    // Use a small epsilon to avoid floating point issues
-    float stdDevThreshold = 1.0f;
-    if (stdDevL < stdDevThreshold) {
-        output_disparity[indexL] = 0; // Assign zero disparity for textureless areas
+    if (i >= width || j >= height) {
         return;
     }
 
-    float max_zncc_val = -1.0f; // ZNCC is in [-1, 1]
-    int best_d = 0;
+    const int win_radius = WIN_SIZE / 2;
+    const int num_pixels_in_window = WIN_SIZE * WIN_SIZE;
+    const float inv_num_pixels = 1.0f / (float)num_pixels_in_window;
 
-    // Iterate through possible disparities
-    // d = 0 means comparing (x, y) in left with (x, y) in right
-    // d > 0 means comparing (x, y) in left with (x-d, y) in right
-    for (int d = 0; d <= max_disp; d++) {
-        int xR = x - d; // Corresponding x coordinate in the right image
+    float max_zncc_score = -1.0f;
+    int best_disparity = 0;
 
-        // Check if the right coordinate is within bounds
-        if (xR < 0) {
-            break; // No need to check further disparities for this pixel
+    for (int d = 0; d < MAX_DISP; ++d) {
+        if (i < d) {
+           continue;
         }
 
-        int indexR = y * width + xR;
-        float meanR = right_means[indexR];
-        float stdDevR = right_stddevs[indexR];
+        float sum_L = 0.0f;
+        float sum_R = 0.0f;
 
-        // Skip if the right window is textureless
-        if (stdDevR < stdDevThreshold) {
-            continue;
+        // *** CHANGE 1: Read using read_imageui and convert ***
+        for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
+            for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
+                int2 coord_L = (int2)(i + win_x, j + win_y);
+                int2 coord_R = (int2)(i - d + win_x, j + win_y);
+
+                // Read as unsigned int (uint4 because image reads return 4 components)
+                uint4 pixel_L_ui = read_imageui(left_image, sampler, coord_L);
+                uint4 pixel_R_ui = read_imageui(right_image, sampler, coord_R);
+
+                // Convert the relevant component (x) to float
+                float val_L = (float)pixel_L_ui.x;
+                float val_R = (float)pixel_R_ui.x;
+
+                sum_L += val_L;
+                sum_R += val_R;
+            }
         }
+        float mean_L = sum_L * inv_num_pixels;
+        float mean_R = sum_R * inv_num_pixels;
 
-        // Calculate ZNCC numerator
         float numerator = 0.0f;
-        int validPoints = 0;
+        float sum_sq_diff_L = 0.0f;
+        float sum_sq_diff_R = 0.0f;
 
-        // Define window boundaries for the *current* pixel (x,y) in left
-        // and (xR, y) in right. Clamping ensures we stay within image bounds.
-        int win_start_y = max(0, y - win_hsize);
-        int win_end_y   = min(height - 1, y + win_hsize);
-        int win_start_xL = max(0, x - win_hsize);    // Window x-start in Left
-        int win_end_xL   = min(width - 1, x + win_hsize); // Window x-end in Left
+        // *** CHANGE 2: Read using read_imageui and convert ***
+        for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
+            for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
+                int2 coord_L = (int2)(i + win_x, j + win_y);
+                int2 coord_R = (int2)(i - d + win_x, j + win_y);
 
-        // Iterate through the window centered at (x,y) in the left image
-        for (int wy = win_start_y; wy <= win_end_y; wy++) {
-            for (int wxL = win_start_xL; wxL <= win_end_xL; wxL++) {
-                int wxR = wxL - d; // Corresponding window x in the Right image
+                uint4 pixel_L_ui = read_imageui(left_image, sampler, coord_L);
+                uint4 pixel_R_ui = read_imageui(right_image, sampler, coord_R);
 
-                // Ensure the corresponding pixel in the right image's *window* is valid
-                // The center pixel xR is already checked, but window edges might go out
-                if (wxR >= 0 && wxR < width) {
-                     // Ensure this point wxR is also within the conceptual window boundaries of the right pixel centered at xR.
-                     // This check is implicitly handled by iterating over the *left* window and calculating the corresponding right coord wxR,
-                     // as long as we ensure wxR stays within the image (0 to width-1).
-                    float valL = left_image[wy * width + wxL];
-                    float valR = right_image[wy * width + wxR];
+                float val_L = (float)pixel_L_ui.x;
+                float val_R = (float)pixel_R_ui.x;
 
-                    numerator += (valL - meanL) * (valR - meanR);
-                    validPoints++;
-                }
+                float diff_L = val_L - mean_L;
+                float diff_R = val_R - mean_R;
+
+                numerator += diff_L * diff_R;
+                sum_sq_diff_L += diff_L * diff_L;
+                sum_sq_diff_R += diff_R * diff_R;
             }
         }
 
-        // Calculate ZNCC value if denominator is valid
-        if (validPoints > 0) {
-            // Add a small epsilon to prevent division by zero/very small numbers
-            float denominator = stdDevL * stdDevR * (float)validPoints;
-            if (denominator > 1e-6f) { // Avoid division by zero or near-zero
-                 float zncc = numerator / denominator;
+        float current_zncc_score = 0.0f;
+        float denominator = sqrt(sum_sq_diff_L * sum_sq_diff_R);
+        const float epsilon = 1e-6f; // Maybe increase epsilon slightly if needed
 
-                 // Clamp ZNCC to [-1, 1] range just in case of float inaccuracies
-                 zncc = clamp(zncc, -1.0f, 1.0f);
-
-                if (zncc > max_zncc_val) {
-                    max_zncc_val = zncc;
-                    best_d = d;
-                }
-            }
+        if (denominator > epsilon) {
+            current_zncc_score = numerator / denominator;
         }
-    } // End disparity loop (d)
 
-    // Normalize disparity value to [0, 255] and write to output
-    // Use convert_uchar_sat for safe conversion and clamping to 0-255 range
-    uchar normalized_d = 0;
-    if (max_disp > 0) { // Avoid division by zero if max_disp is 0
-       normalized_d = convert_uchar_sat(((float)best_d * 255.0f) / (float)max_disp);
+        if (current_zncc_score > max_zncc_score) {
+            max_zncc_score = current_zncc_score;
+            best_disparity = d;
+        }
     }
-    output_disparity[indexL] = normalized_d;
+
+    int output_index = j * width + i;
+    disparity_map[output_index] = 255 - (uchar)best_disparity;
 }
