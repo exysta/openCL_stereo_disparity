@@ -81,85 +81,137 @@ __kernel void zncc_stereo_match(
     const int i = get_global_id(0);
     const int j = get_global_id(1);
 
+    // Boundary check: Ensure the work-item is within the image bounds
     if (i >= width || j >= height) {
         return;
     }
 
     const int win_radius = WIN_SIZE / 2;
     const int num_pixels_in_window = WIN_SIZE * WIN_SIZE;
+    // Use float for division to avoid potential integer truncation issues earlier
     const float inv_num_pixels = 1.0f / (float)num_pixels_in_window;
 
-    float max_zncc_score = -1.0f;
+    float max_zncc_score = -1.0f; // Initialize with lowest possible valid ZNCC score
     int best_disparity = 0;
 
+    // Pre-calculate the mean for the left window once
+    float sum_L = 0.0f;
+    for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
+        for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
+            // Use int2 for coordinates passed to read_image
+            int2 coord_L = (int2)(i + win_x, j + win_y);
+            // Read unsigned int, take the first component (R channel), cast to float
+            sum_L += (float)read_imageui(left_image, sampler, coord_L).x;
+        }
+    }
+    float mean_L = sum_L * inv_num_pixels;
+    float sum_sq_diff_L = 0.0f; // Calculate sum_sq_diff_L here as well
+
+    // Calculate sum of squared differences for the left window
+    for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
+        for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
+            int2 coord_L = (int2)(i + win_x, j + win_y);
+            float val_L = (float)read_imageui(left_image, sampler, coord_L).x;
+            float diff_L = val_L - mean_L;
+            sum_sq_diff_L += diff_L * diff_L;
+        }
+    }
+
+
+    // Iterate through possible disparities
     for (int d = 0; d < MAX_DISP; ++d) {
+        // Ensure the right window's center pixel is within the image bounds
+        // The window itself might still go out of bounds, handled by the sampler
         if (i < d) {
-           continue;
+           continue; // Skip disparities that would require pixels outside the left image edge
         }
 
-        float sum_L = 0.0f;
         float sum_R = 0.0f;
 
-        // *** CHANGE 1: Read using read_imageui and convert ***
+        // Calculate mean for the right window (shifted by disparity d)
         for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
             for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
-                int2 coord_L = (int2)(i + win_x, j + win_y);
                 int2 coord_R = (int2)(i - d + win_x, j + win_y);
-
-                // Read as unsigned int (uint4 because image reads return 4 components)
-                uint4 pixel_L_ui = read_imageui(left_image, sampler, coord_L);
-                uint4 pixel_R_ui = read_imageui(right_image, sampler, coord_R);
-
-                // Convert the relevant component (x) to float
-                float val_L = (float)pixel_L_ui.x;
-                float val_R = (float)pixel_R_ui.x;
-
-                sum_L += val_L;
-                sum_R += val_R;
+                sum_R += (float)read_imageui(right_image, sampler, coord_R).x;
             }
         }
-        float mean_L = sum_L * inv_num_pixels;
         float mean_R = sum_R * inv_num_pixels;
 
         float numerator = 0.0f;
-        float sum_sq_diff_L = 0.0f;
+        // float sum_sq_diff_L = 0.0f; // Moved calculation outside the loop
         float sum_sq_diff_R = 0.0f;
 
-        // *** CHANGE 2: Read using read_imageui and convert ***
+        // Calculate numerator and sum of squared differences for the right window
         for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
             for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
                 int2 coord_L = (int2)(i + win_x, j + win_y);
                 int2 coord_R = (int2)(i - d + win_x, j + win_y);
 
-                uint4 pixel_L_ui = read_imageui(left_image, sampler, coord_L);
-                uint4 pixel_R_ui = read_imageui(right_image, sampler, coord_R);
+                // Read pixel values
+                float val_L = (float)read_imageui(left_image, sampler, coord_L).x;
+                float val_R = (float)read_imageui(right_image, sampler, coord_R).x;
 
-                float val_L = (float)pixel_L_ui.x;
-                float val_R = (float)pixel_R_ui.x;
-
+                // Calculate differences from mean
                 float diff_L = val_L - mean_L;
                 float diff_R = val_R - mean_R;
 
+                // Accumulate for ZNCC formula
                 numerator += diff_L * diff_R;
-                sum_sq_diff_L += diff_L * diff_L;
+                // sum_sq_diff_L += diff_L * diff_L; // Moved calculation outside the loop
                 sum_sq_diff_R += diff_R * diff_R;
             }
         }
 
-        float current_zncc_score = 0.0f;
+        // Calculate ZNCC score for the current disparity
+        float current_zncc_score = -2.0f; // Default score for invalid/flat areas
         float denominator = sqrt(sum_sq_diff_L * sum_sq_diff_R);
-        const float epsilon = 1e-6f; // Maybe increase epsilon slightly if needed
+        // Use a small epsilon to avoid division by zero or near-zero (instability)
+        const float epsilon = 1e-6f; // Adjust if needed, but 1e-6 is common
 
         if (denominator > epsilon) {
             current_zncc_score = numerator / denominator;
+            // Clamp score to valid range [-1, 1] just in case of float inaccuracies
+            current_zncc_score = clamp(current_zncc_score, -1.0f, 1.0f);
         }
+        // else: score remains -2.0, won't be chosen unless all scores are -2.0
 
+        // Update best disparity if current score is higher
         if (current_zncc_score > max_zncc_score) {
             max_zncc_score = current_zncc_score;
             best_disparity = d;
         }
     }
 
+    // Calculate output index
+    int output_index = j * width + i;
+
+    // --- FIX: Scale disparity to [0, 255] range before inversion ---
+    uchar output_value;
+    if (MAX_DISP <= 1) {
+        // If MAX_DISP is 0 or 1, disparity can only be 0.
+        // Map disparity 0 to 255 (brightest) based on the inversion scheme.
+        output_value = 255;
+    } else {
+        // Scale disparity from [0, MAX_DISP-1] to [0, 255]
+        // Use float division for accuracy.
+        float scaled_disparity = ((float)best_disparity * 255.0f) / ((float)MAX_DISP - 1.0f);
+
+        // Clamp scaled value to [0, 255] before casting (safety measure)
+        scaled_disparity = clamp(scaled_disparity, 0.0f, 255.0f);
+
+        // Invert: Higher disparity means darker pixel (lower uchar value)
+        // This matches the visual appearance of the desired output image.
+        output_value = 255 - (uchar)scaled_disparity;
+    }
+    // --- END FIX ---
+
+    // Write the final scaled and inverted disparity value
+    disparity_map[output_index] = output_value;
+
+
+    /* --- OLD VERSION (commented out) ---
+    // This version causes the bright output if MAX_DISP << 255
     int output_index = j * width + i;
     disparity_map[output_index] = 255 - (uchar)best_disparity;
+    */
 }
