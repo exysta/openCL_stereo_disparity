@@ -184,7 +184,7 @@ __kernel void zncc_stereo_match(
         scaled_disparity = clamp(scaled_disparity, 0.0f, 255.0f);
 
         // Invert: higher disparity -> darker pixel
-        output_value = 255 - (uchar)scaled_disparity;
+        output_value = (uchar)scaled_disparity;
     }
 
     // Write output value
