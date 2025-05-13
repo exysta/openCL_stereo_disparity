@@ -1,46 +1,45 @@
-// disparity_kernel.cl
+// Stereo disparity calculation kernel
 __kernel void disparity(
-    __global const uchar* image0,    // image de gauche (gauche)
-    __global const uchar* image1,    // image de droite (droite)
-    __global uchar* disparity,       // image de disparité en sortie
+    __global const uchar* left_img,    // left image
+    __global const uchar* right_img,    // right image
+    __global uchar* disparity_map,       // output disparity map
     const int width,
     const int height
 ) {
     const int x = get_global_id(0);
     const int y = get_global_id(1);
     
-    // Vérifier que nous sommes dans les limites de l'image
     if (x >= width || y >= height) {
         return;
     }
     
-    // Paramètres du matching
-    const int window_size = 11;      // taille de la fenêtre augmentée (doit être impair)
+    // Matching parameters
+    const int window_size = 11;      // window size
     const int half_window = window_size / 2;
-    const int max_disparity = 50;     // plage maximale de disparité
-    const float min_zncc_threshold = 0.5f;  // seuil minimum augmenté pour réduire les artefacts
+    const int max_disp = 50;     // maximum disparity
+    const float min_zncc = 0.5f;  // minimum ZNCC threshold
     
-    // Vérifier que nous avons assez d'espace pour la fenêtre
+    // Check if we have enough space for the window
     if (x < half_window || y < half_window || x >= width - half_window || y >= height - half_window) {
-        disparity[y * width + x] = 0;
+        disparity_map[y * width + x] = 0;
         return;
     }
     
-    // Calcul de la moyenne et de l'écart-type pour la fenêtre de gauche
+    // Calculate mean and standard deviation for the left window
     float sum_left = 0.0f;
     float sum_sq_left = 0.0f;
     int count = 0;
     
-    // Calcul de la moyenne pour la fenêtre de gauche
+    // Calculate mean for the left window
     for (int wy = -half_window; wy <= half_window; wy++) {
         for (int wx = -half_window; wx <= half_window; wx++) {
             int ny = y + wy;
             int nx = x + wx;
             
-            // Vérifier que nous sommes dans les limites
+            // Check if we are within bounds
             if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
                 int left_index = ny * width + nx;
-                float val = (float)image0[left_index];
+                float val = (float)left_img[left_index];
                 sum_left += val;
                 sum_sq_left += val * val;
                 count++;
@@ -50,39 +49,39 @@ __kernel void disparity(
     
     float mean_left = sum_left / count;
     float var_left = (sum_sq_left / count) - (mean_left * mean_left);
-    float std_dev_left = sqrt(var_left > 0.0001f ? var_left : 0.0001f);  // Éviter division par zéro
+    float std_dev_left = sqrt(var_left > 0.0001f ? var_left : 0.0001f);  // Avoid division by zero
     
-    // Si l'écart-type est trop faible (zone uniforme), on saute le calcul
+    // If standard deviation is too low (uniform area), skip calculation
     if (std_dev_left < 1.0f) {
-        disparity[y * width + x] = 0;
+        disparity_map[y * width + x] = 0;
         return;
     }
     
-    float best_zncc = -1.0f;  // ZNCC est dans [-1,1], on commence à -1
-    int best_disparity = 0;
+    float best_zncc = -1.0f;  // ZNCC is in [-1,1], start at -1
+    int best_disp = 0;
     
-    // On itère sur les disparités possibles
-    for (int d = 0; d <= min(max_disparity, x); d++) {
+    // Iterate over possible disparities
+    for (int d = 0; d <= min(max_disp, x); d++) {
         int xR = x - d;
         
-        // Vérifier que l'on reste dans l'image
+        // Check if we are within bounds
         if (xR < half_window) continue;
         
-        // Calcul de la moyenne et de l'écart-type pour la fenêtre de droite
+        // Calculate mean and standard deviation for the right window
         float sum_right = 0.0f;
         float sum_sq_right = 0.0f;
         count = 0;
         
-        // Calcul de la moyenne pour la fenêtre de droite
+        // Calculate mean for the right window
         for (int wy = -half_window; wy <= half_window; wy++) {
             for (int wx = -half_window; wx <= half_window; wx++) {
                 int ny = y + wy;
                 int nx = xR + wx;
                 
-                // Vérifier que nous sommes dans les limites
+                // Check if we are within bounds
                 if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
                     int right_index = ny * width + nx;
-                    float val = (float)image1[right_index];
+                    float val = (float)right_img[right_index];
                     sum_right += val;
                     sum_sq_right += val * val;
                     count++;
@@ -92,12 +91,12 @@ __kernel void disparity(
         
         float mean_right = sum_right / count;
         float var_right = (sum_sq_right / count) - (mean_right * mean_right);
-        float std_dev_right = sqrt(var_right > 0.0001f ? var_right : 0.0001f);  // Éviter division par zéro
+        float std_dev_right = sqrt(var_right > 0.0001f ? var_right : 0.0001f);  // Avoid division by zero
         
-        // Si l'écart-type est trop faible (zone uniforme), on saute cette disparité
+        // If standard deviation is too low (uniform area), skip this disparity
         if (std_dev_right < 1.0f) continue;
         
-        // Calcul du ZNCC
+        // Calculate ZNCC
         float numerator = 0.0f;
         count = 0;
         
@@ -107,12 +106,12 @@ __kernel void disparity(
                 int nx_left = x + wx;
                 int nx_right = xR + wx;
                 
-                // Vérifier que nous sommes dans les limites
+                // Check if we are within bounds
                 if (nx_left >= 0 && nx_left < width && nx_right >= 0 && nx_right < width && ny >= 0 && ny < height) {
                     int left_index = ny * width + nx_left;
                     int right_index = ny * width + nx_right;
-                    float diff_left = (float)image0[left_index] - mean_left;
-                    float diff_right = (float)image1[right_index] - mean_right;
+                    float diff_left = (float)left_img[left_index] - mean_left;
+                    float diff_right = (float)right_img[right_index] - mean_right;
                     numerator += diff_left * diff_right;
                     count++;
                 }
@@ -121,68 +120,339 @@ __kernel void disparity(
         
         float zncc = numerator / (count * std_dev_left * std_dev_right);
         
-        // On garde la disparité avec la meilleure corrélation
+        // Keep the disparity with the best correlation
         if (zncc > best_zncc) {
             best_zncc = zncc;
-            best_disparity = d;
+            best_disp = d;
         }
     }
     
-    // Si la meilleure corrélation est trop faible, on considère qu'il n'y a pas de correspondance
-    if (best_zncc < min_zncc_threshold) {
-        disparity[y * width + x] = 0;
+    // If the best correlation is too low, consider no match
+    if (best_zncc < min_zncc) {
+        disparity_map[y * width + x] = 0;
         return;
     }
     
-    // Normaliser la disparité sur [0,255]
-    disparity[y * width + x] = (uchar)((best_disparity * 255) / max_disparity);
+    // Normalize disparity to [0,255]
+    disparity_map[y * width + x] = (uchar)((best_disp * 255) / max_disp);
 }
 
-// Kernel de lissage multi-étape pour réduire les artefacts
-__kernel void smooth_disparity(
-    __global const uchar* input_disparity,  // carte de disparité d'entrée
-    __global uchar* output_disparity,       // carte de disparité lissée en sortie
+// Disparity calculation from right to left (for cross-checking)
+__kernel void disparity_right_to_left(
+    __global const uchar* left_img,    // left image (will be target)
+    __global const uchar* right_img,   // right image (will be reference)
+    __global uchar* disparity_map,    // output disparity map (right-to-left)
     const int width,
     const int height
 ) {
     const int x = get_global_id(0);
     const int y = get_global_id(1);
     
-    // Vérifier que nous sommes dans les limites de l'image
     if (x >= width || y >= height) {
         return;
     }
     
-    // Utiliser une fenêtre plus grande pour un meilleur lissage
-    const int filter_size = 7; // Augmenté à 7x7
-    const int half_filter = filter_size / 2;
+    // Matching parameters
+    const int window_size = 11;     // window size
+    const int half_window = window_size / 2;
+    const int max_disp = 50;       // maximum disparity
+    const float min_zncc = 0.5f;   // minimum ZNCC threshold
     
-    // Ignorer les bords
-    if (x < half_filter || y < half_filter || x >= width - half_filter || y >= height - half_filter) {
-        output_disparity[y * width + x] = input_disparity[y * width + x];
+    // Check if we have enough space for the window
+    if (x < half_window || y < half_window || x >= width - half_window || y >= height - half_window) {
+        disparity_map[y * width + x] = 0;
         return;
     }
     
-    // Filtre médian 7x7
+    // Calculate mean and standard deviation for the right window (reference)
+    float sum_right = 0.0f;
+    float sum_sq_right = 0.0f;
+    int count = 0;
+    
+    // Calculate mean for the right window
+    for (int wy = -half_window; wy <= half_window; wy++) {
+        for (int wx = -half_window; wx <= half_window; wx++) {
+            int ny = y + wy;
+            int nx = x + wx;
+            
+            // Check if we are within bounds
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                int right_index = ny * width + nx;
+                float val = (float)right_img[right_index];
+                sum_right += val;
+                sum_sq_right += val * val;
+                count++;
+            }
+        }
+    }
+    
+    float mean_right = sum_right / count;
+    float var_right = (sum_sq_right / count) - (mean_right * mean_right);
+    float std_dev_right = sqrt(var_right > 0.0001f ? var_right : 0.0001f);  // Avoid division by zero
+    
+    // If standard deviation is too low (uniform area), skip calculation
+    if (std_dev_right < 1.0f) {
+        disparity_map[y * width + x] = 0;
+        return;
+    }
+    
+    float best_zncc = -1.0f;  // ZNCC is in [-1,1], start at -1
+    int best_disp = 0;
+    
+    // Iterate over possible disparities (in the opposite direction compared to left-to-right)
+    for (int d = 0; d <= min(max_disp, width-1-x); d++) {
+        int xL = x + d;  // Left image coordinates (x + disparity)
+        
+        // Check if we are within bounds
+        if (xL >= width - half_window) continue;
+        
+        // Calculate mean and standard deviation for the left window
+        float sum_left = 0.0f;
+        float sum_sq_left = 0.0f;
+        count = 0;
+        
+        // Calculate mean for the left window
+        for (int wy = -half_window; wy <= half_window; wy++) {
+            for (int wx = -half_window; wx <= half_window; wx++) {
+                int ny = y + wy;
+                int nx = xL + wx;
+                
+                // Check if we are within bounds
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                    int left_index = ny * width + nx;
+                    float val = (float)left_img[left_index];
+                    sum_left += val;
+                    sum_sq_left += val * val;
+                    count++;
+                }
+            }
+        }
+        
+        float mean_left = sum_left / count;
+        float var_left = (sum_sq_left / count) - (mean_left * mean_left);
+        float std_dev_left = sqrt(var_left > 0.0001f ? var_left : 0.0001f);  // Avoid division by zero
+        
+        // If standard deviation is too low (uniform area), skip this disparity
+        if (std_dev_left < 1.0f) continue;
+        
+        // Calculate ZNCC
+        float numerator = 0.0f;
+        count = 0;
+        
+        for (int wy = -half_window; wy <= half_window; wy++) {
+            for (int wx = -half_window; wx <= half_window; wx++) {
+                int ny = y + wy;
+                int nx_right = x + wx;
+                int nx_left = xL + wx;
+                
+                // Check if we are within bounds
+                if (nx_left >= 0 && nx_left < width && nx_right >= 0 && nx_right < width && ny >= 0 && ny < height) {
+                    int right_index = ny * width + nx_right;
+                    int left_index = ny * width + nx_left;
+                    float diff_right = (float)right_img[right_index] - mean_right;
+                    float diff_left = (float)left_img[left_index] - mean_left;
+                    numerator += diff_right * diff_left;
+                    count++;
+                }
+            }
+        }
+        
+        float zncc = numerator / (count * std_dev_right * std_dev_left);
+        
+        // Keep the disparity with the best correlation
+        if (zncc > best_zncc) {
+            best_zncc = zncc;
+            best_disp = d;
+        }
+    }
+    
+    // If the best correlation is too low, consider no match
+    if (best_zncc < min_zncc) {
+        disparity_map[y * width + x] = 0;
+        return;
+    }
+    
+    // Normalize disparity to [0,255]
+    disparity_map[y * width + x] = (uchar)((best_disp * 255) / max_disp);
+}
+
+// Cross-check kernel to identify occlusions
+__kernel void cross_check(
+    __global const uchar* left_disp,   // disparity from left to right
+    __global const uchar* right_disp,  // disparity from right to left
+    __global uchar* checked_disp,      // output disparity map after cross-check
+    const int width,
+    const int height,
+    const int max_disp,               // maximum disparity
+    const int threshold               // cross-check threshold
+) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    
+    if (x >= width || y >= height) {
+        return;
+    }
+    
+    // Get the left-to-right disparity
+    const uchar disp_l = left_disp[y * width + x];
+    
+    // Invalid disparity value (already marked)
+    if (disp_l == 0) {
+        checked_disp[y * width + x] = 0; // Mark as occlusion
+        return;
+    }
+    
+    // Convert normalized disparity back to pixel units
+    const float disp_factor = (float)max_disp / 255.0f;
+    const int d = (int)(disp_l * disp_factor + 0.5f);
+    
+    // Compute corresponding point in right image
+    const int xr = x - d;
+    
+    // If the corresponding point is outside the image, it's an occlusion
+    if (xr < 0 || xr >= width) {
+        checked_disp[y * width + x] = 0; // Mark as occlusion
+        return;
+    }
+    
+    // Get the right-to-left disparity at the corresponding point
+    const uchar disp_r = right_disp[y * width + xr];
+    
+    // Convert right-to-left disparity to pixel units
+    const int dr = (int)(disp_r * disp_factor + 0.5f);
+    
+    // Cross-check: if left and right disparities are consistent (within threshold)
+    // abs(d - dr) <= threshold, then the match is good
+    if (abs(d - dr) <= threshold) {
+        checked_disp[y * width + x] = disp_l; // Keep the original disparity
+    } else {
+        checked_disp[y * width + x] = 0; // Mark as occlusion
+    }
+}
+
+// Occlusion filling kernel
+__kernel void fill_occlusions(
+    __global const uchar* input_disp,  // disparity map with occlusions (marked as 0)
+    __global uchar* output_disp,       // output filled disparity map
+    const int width,
+    const int height,
+    const int iteration                // iteration number for multi-pass filling
+) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    
+    if (x >= width || y >= height) {
+        return;
+    }
+    
+    // Current pixel value
+    const uchar disp = input_disp[y * width + x];
+    
+    // If this is not an occluded pixel, keep its value
+    if (disp > 0) {
+        output_disp[y * width + x] = disp;
+        return;
+    }
+    
+    // This is an occluded pixel, try to fill it
+    
+    // Define the search neighborhood radius based on iteration
+    // Start with smaller radius and increase with iterations
+    const int radius = 2 + iteration * 2; // Increases with each iteration
+    
+    // Variables to accumulate weighted disparities
+    float weighted_sum = 0.0f;
+    float weight_sum = 0.0f;
+    
+    // Parameters for weighted filling
+    const float sigma_space = 10.0f;   // Spatial distance weight
+    const float sigma_color = 30.0f;   // Color similarity weight (if we had color info)
+    
+    // For background interpolation, favor points to the right (background)
+    // Search area with a bias towards points to the right (lower disparity)
+    for (int wy = -radius; wy <= radius; wy++) {
+        for (int wx = -radius; wx <= radius; wx++) {
+            // Bias the search more towards right side
+            // This helps to fill occluded areas with background disparities
+            if (iteration % 2 == 0 && wx < 0) continue; // Right-side bias on even iterations
+            if (iteration % 2 == 1 && wx > 0) continue; // Left-side bias on odd iterations
+            
+            int ny = y + wy;
+            int nx = x + wx;
+            
+            // Check if the neighboring pixel is within bounds
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                uchar neighbor_disp = input_disp[ny * width + nx];
+                
+                // Skip occluded points
+                if (neighbor_disp == 0) continue;
+                
+                // Calculate spatial distance weight
+                float space_dist = (float)(wx*wx + wy*wy);
+                float space_weight = exp(-space_dist / (2.0f * sigma_space * sigma_space));
+                
+                // Apply weight
+                float weight = space_weight;
+                weighted_sum += weight * (float)neighbor_disp;
+                weight_sum += weight;
+            }
+        }
+    }
+    
+    // If we found valid neighboring pixels, compute weighted average
+    if (weight_sum > 0.0f) {
+        output_disp[y * width + x] = (uchar)(weighted_sum / weight_sum);
+    } else {
+        // If no valid neighbors found, keep it as an occlusion
+        // (Will be filled in later iterations or by a subsequent smoothing step)
+        output_disp[y * width + x] = 0;
+    }
+}
+
+// Disparity smoothing kernel
+__kernel void smooth_disparity(
+    __global const uchar* input,
+    __global uchar* output,
+    const int width,
+    const int height
+) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    
+    if (x >= width || y >= height) {
+        return;
+    }
+    
+    // Use a larger window for better smoothing
+    const int filter_size = 7;
+    const int half_filter = filter_size / 2;
+    
+    // Ignore borders
+    if (x < half_filter || y < half_filter || x >= width - half_filter || y >= height - half_filter) {
+        output[y * width + x] = input[y * width + x];
+        return;
+    }
+    
+    // 7x7 median filter
     uchar values[filter_size * filter_size];
     int idx = 0;
-    int hist[256] = {0}; // Histogramme pour détection des modes
+    int hist[256] = {0}; // Histogram for mode detection
     
     for (int wy = -half_filter; wy <= half_filter; wy++) {
         for (int wx = -half_filter; wx <= half_filter; wx++) {
             int ny = y + wy;
             int nx = x + wx;
             
-            // Vérifier que nous sommes dans les limites
+            // Check if we are within bounds
             if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                uchar val = input_disparity[ny * width + nx];
+                uchar val = input[ny * width + nx];
                 values[idx++] = val;
-                hist[val]++; // Mettre à jour l'histogramme
+                hist[val]++; // Update histogram
             }
         }
     }
     
-    // Trouver la valeur modale (la plus fréquente) dans la fenêtre
+    // Find the modal value (most frequent) in the window
     int max_count = 0;
     uchar mode_value = 0;
     for (int i = 0; i < 256; i++) {
@@ -192,7 +462,7 @@ __kernel void smooth_disparity(
         }
     }
     
-    // Tri simple pour trouver la médiane
+    // Simple sort to find the median
     for (int i = 0; i < idx - 1; i++) {
         for (int j = 0; j < idx - i - 1; j++) {
             if (values[j] > values[j + 1]) {
@@ -203,25 +473,25 @@ __kernel void smooth_disparity(
         }
     }
     
-    // La médiane est l'élément du milieu
+    // The median is the middle element
     uchar median_value = values[idx / 2];
     
-    // Détection et correction des discontinuités
-    int center_value = input_disparity[y * width + x];
+    // Discontinuity detection and correction
+    int center_value = input[y * width + x];
     int sum_diff = 0;
     int count = 0;
     int max_diff = 0;
     
-    // Vérifier les différences avec les voisins
-    for (int wy = -2; wy <= 2; wy++) { // Élargi à 5x5 pour la détection des artefacts
+    // Check differences with neighbors
+    for (int wy = -2; wy <= 2; wy++) { 
         for (int wx = -2; wx <= 2; wx++) {
-            if (wx == 0 && wy == 0) continue; // Ignorer le pixel central
+            if (wx == 0 && wy == 0) continue; // Ignore the center pixel
             
             int ny = y + wy;
             int nx = x + wx;
             
             if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                int neighbor_value = input_disparity[ny * width + nx];
+                int neighbor_value = input[ny * width + nx];
                 int diff = abs(center_value - neighbor_value);
                 sum_diff += diff;
                 max_diff = max(max_diff, diff);
@@ -230,20 +500,20 @@ __kernel void smooth_disparity(
         }
     }
     
-    // Décider de la valeur finale en fonction de plusieurs critères
+    // Decide the final value based on several criteria
     uchar final_value;
     
-    // Si la différence moyenne est trop grande, c'est probablement un artefact
+    // If the average difference is too large, it's likely an artifact
     if (count > 0 && ((float)sum_diff / count > 20.0f || max_diff > 50)) {
-        // Utiliser une combinaison de médiane et de mode pour réduire les artefacts
-        if (max_count > idx / 3) { // Si le mode est significatif (>33% des pixels)
+        // Use a combination of median and mode to reduce artifacts
+        if (max_count > idx / 3) { // If the mode is significant (>33% of pixels)
             final_value = mode_value;
         } else {
             final_value = median_value;
         }
     } else {
-        // Pas d'artefact détecté, utiliser un filtre bilatéral simplifié
-        // qui préserve mieux les bords
+        // No artifact detected, use a simplified bilateral filter
+        // that preserves edges better
         float sum_weights = 0.0f;
         float sum_values = 0.0f;
         float sigma_space = 2.0f;
@@ -255,11 +525,11 @@ __kernel void smooth_disparity(
                 int nx = x + wx;
                 
                 if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                    uchar neighbor_value = input_disparity[ny * width + nx];
+                    uchar neighbor_value = input[ny * width + nx];
                     float space_dist = (float)(wx*wx + wy*wy);
                     float range_dist = (float)((int)neighbor_value - (int)center_value) * ((int)neighbor_value - (int)center_value);
                     
-                    // Poids combiné (distance spatiale et différence de valeur)
+                    // Combined weight (spatial distance and value difference)
                     float weight = exp(-space_dist/(2.0f*sigma_space*sigma_space)) * 
                                  exp(-range_dist/(2.0f*sigma_range*sigma_range));
                     
@@ -272,9 +542,9 @@ __kernel void smooth_disparity(
         if (sum_weights > 0.0f) {
             final_value = (uchar)(sum_values / sum_weights);
         } else {
-            final_value = median_value; // Fallback à la médiane
+            final_value = median_value; // Fallback to median
         }
     }
     
-    output_disparity[y * width + x] = final_value;
+    output[y * width + x] = final_value;
 }

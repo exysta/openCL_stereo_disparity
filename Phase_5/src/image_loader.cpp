@@ -14,9 +14,9 @@ int main(int argc, char* argv[]) {
     const char* output_path = "disparity_map.png";
     int max_disparity = 50;
     int window_size = 9;
-    bool use_opencl = true; // Par défaut, utiliser OpenCL
+    bool use_opencl = true; // Default to use OpenCL
     
-    // Traitement des arguments de ligne de commande
+    // Process command line arguments
     if(argc > 2) {
         left_path = argv[1];
         right_path = argv[2];
@@ -31,25 +31,25 @@ int main(int argc, char* argv[]) {
         window_size = atoi(argv[5]);
     }
     if(argc > 6) {
-        use_opencl = (atoi(argv[6]) != 0); // 0 pour CPU, autre chose pour OpenCL
+        use_opencl = (atoi(argv[6]) != 0); // 0 for CPU, other for OpenCL
     }
     
-    std::cout << "Chargement des images..." << std::endl;
+    std::cout << "Loading images..." << std::endl;
     
     if (use_opencl) {
-        // ===== Version OpenCL =====
+        // ===== OpenCL Version =====
         cl_int err;
 
         cl_uint numPlatforms;
         err = clGetPlatformIDs(0, NULL, &numPlatforms);
         if (err != CL_SUCCESS || numPlatforms == 0) {
-            std::cerr << "Aucune plateforme OpenCL trouvée. Utilisation de la version CPU." << std::endl;
+            std::cerr << "No OpenCL platform found. Using CPU version." << std::endl;
             use_opencl = false;
         } else {
             std::vector<cl_platform_id> platforms(numPlatforms);
             err = clGetPlatformIDs(numPlatforms, platforms.data(), NULL);
             if (err != CL_SUCCESS) {
-                std::cerr << "Erreur lors de la récupération des plateformes. Utilisation de la version CPU." << std::endl;
+                std::cerr << "Error retrieving platforms. Using CPU version." << std::endl;
                 use_opencl = false;
             } else {
                 cl_platform_id platform = platforms[0];
@@ -57,18 +57,18 @@ int main(int argc, char* argv[]) {
                 cl_uint numDevices;
                 err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, 0, NULL, &numDevices);
                 if (err != CL_SUCCESS || numDevices == 0) {
-                    std::cerr << "Aucun device OpenCL trouvé. Utilisation de la version CPU." << std::endl;
+                    std::cerr << "No OpenCL device found. Using CPU version." << std::endl;
                     use_opencl = false;
                 } else {
                     std::vector<cl_device_id> devices(numDevices);
                     err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, numDevices, devices.data(), NULL);
                     if (err != CL_SUCCESS) {
-                        std::cerr << "Erreur lors de la récupération des devices. Utilisation de la version CPU." << std::endl;
+                        std::cerr << "Error retrieving devices. Using CPU version." << std::endl;
                         use_opencl = false;
                     } else {
                         cl_device_id device = devices[0];
                         
-                        // Récupérer et afficher les informations du GPU
+                        // Get and display GPU information
                         cl_ulong local_mem_size;
                         cl_ulong global_mem_size;
                         cl_uint compute_units;
@@ -87,7 +87,7 @@ int main(int argc, char* argv[]) {
                         clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS, sizeof(cl_uint), &max_work_item_dims, NULL);
                         clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof(max_work_item_sizes), &max_work_item_sizes, NULL);
                         
-                        std::cout << "\n===== Informations du GPU =====" << std::endl;
+                        std::cout << "\n===== GPU Information =====" << std::endl;
                         std::cout << "CL_DEVICE_LOCAL_MEM_SIZE: " << local_mem_size << " bytes" << std::endl;
                         std::cout << "CL_DEVICE_GLOBAL_MEM_SIZE: " << global_mem_size / (1024*1024) << " MB" << std::endl;
                         std::cout << "CL_DEVICE_MAX_COMPUTE_UNITS: " << compute_units << std::endl;
@@ -101,24 +101,24 @@ int main(int argc, char* argv[]) {
                         
                         cl_context context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
                         if (err != CL_SUCCESS) {
-                            std::cerr << "Erreur lors de la création du contexte. Utilisation de la version CPU." << std::endl;
+                            std::cerr << "Error creating context. Using CPU version." << std::endl;
                             use_opencl = false;
                         } else {
-                            // Créer une command queue avec le support du profilage
+                            // Create a command queue with profiling support
                             cl_command_queue commandQueue = clCreateCommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err);
                             if (err != CL_SUCCESS) {
-                                std::cerr << "Erreur lors de la création de la command queue. Utilisation de la version CPU." << std::endl;
+                                std::cerr << "Error creating command queue. Using CPU version." << std::endl;
                                 clReleaseContext(context);
                                 use_opencl = false;
                             } else {
-                                std::cout << "Contexte OpenCL et command queue créés avec succès." << std::endl;
+                                std::cout << "OpenCL context and command queue created successfully." << std::endl;
 
                                 int width, height, channels;
 
                                 unsigned char* image0 = stbi_load(left_path, &width, &height, &channels, 0);
                                 unsigned char* image1 = stbi_load(right_path, &width, &height, &channels, 0);
                                 if (!image0 || !image1) {
-                                    std::cerr << "Erreur lors du chargement des images." << std::endl;
+                                    std::cerr << "Error loading images." << std::endl;
                                     if (image0) stbi_image_free(image0);
                                     if (image1) stbi_image_free(image1);
                                     clReleaseCommandQueue(commandQueue);
@@ -126,55 +126,60 @@ int main(int argc, char* argv[]) {
                                     return 1;
                                 }
                                 
-                                std::cout << "Image gauche: " << width << "x" << height << ", " << channels << " channels" << std::endl;
-                                std::cout << "Image droite: " << width << "x" << height << ", " << channels << " channels" << std::endl;
+                                std::cout << "Left image: " << width << "x" << height << ", " << channels << " channels" << std::endl;
+                                std::cout << "Right image: " << width << "x" << height << ", " << channels << " channels" << std::endl;
                                 
-                                // Convertir les images en niveaux de gris avec OpenCL
-                                std::cout << "\nConversion des images en niveaux de gris avec OpenCL..." << std::endl;
+                                // Convert images to grayscale with OpenCL
+                                std::cout << "\nConverting images to grayscale with OpenCL..." << std::endl;
                                 std::vector<unsigned char> grayImage0 = convertToGrayscaleGPU(context, commandQueue, image0, width, height, channels);
                                 std::vector<unsigned char> grayImage1 = convertToGrayscaleGPU(context, commandQueue, image1, width, height, channels);
                                 
-                                // Redimensionner les images si nécessaire
+                                // Resize images if necessary
                                 int target_width = width;
                                 int target_height = height;
                                 bool resize_images = false;
                                 
-                                // Si les images sont trop grandes, les redimensionner
+                                // If images are too large, resize them
                                 if (width > 1024 || height > 1024) {
                                     resize_images = true;
                                     float scale = std::min(1024.0f / width, 1024.0f / height);
                                     target_width = static_cast<int>(width * scale);
                                     target_height = static_cast<int>(height * scale);
-                                    std::cout << "\nRedimensionnement des images à " << target_width << "x" << target_height << "..." << std::endl;
+                                    std::cout << "\nResizing images to " << target_width << "x" << target_height << "..." << std::endl;
                                     
                                     grayImage0 = resizeGrayscaleGPU(context, commandQueue, grayImage0, width, height, target_width, target_height);
                                     grayImage1 = resizeGrayscaleGPU(context, commandQueue, grayImage1, width, height, target_width, target_height);
                                     
-                                    // Sauvegarder les images redimensionnées pour vérification
+                                    // Save resized images for verification
                                     stbi_write_png("resized_left.png", target_width, target_height, 1, grayImage0.data(), target_width);
                                     stbi_write_png("resized_right.png", target_width, target_height, 1, grayImage1.data(), target_width);
-                                    std::cout << "Images redimensionnées sauvegardées sous 'resized_left.png' et 'resized_right.png'" << std::endl;
+                                    std::cout << "Resized images saved as 'resized_left.png' and 'resized_right.png'" << std::endl;
                                 }
 
+                                // Save original grayscale images for comparison
+                                stbi_write_png("left_gray.png", width, height, 1, grayImage0.data(), width);
+                                stbi_write_png("right_gray.png", width, height, 1, grayImage1.data(), width);
+                                std::cout << "Original grayscale images saved as 'left_gray.png' and 'right_gray.png'" << std::endl;
+
                                 size_t imageSize = target_width * target_height * sizeof(unsigned char);
-                                // Créer des buffers pour les images en niveaux de gris
+                                // Create buffers for grayscale images
                                 cl_mem imageBuffer0 = clCreateBuffer(context, CL_MEM_READ_ONLY, imageSize, NULL, &err);
                                 cl_mem imageBuffer1 = clCreateBuffer(context, CL_MEM_READ_ONLY, imageSize, NULL, &err);
                                 
                                 if(err != CL_SUCCESS) {
-                                    std::cerr << "Erreur lors de la création des buffers. Utilisation de la version CPU." << std::endl;
+                                    std::cerr << "Error creating buffers. Using CPU version." << std::endl;
                                     stbi_image_free(image0);
                                     stbi_image_free(image1);
                                     clReleaseCommandQueue(commandQueue);
                                     clReleaseContext(context);
                                     use_opencl = false;
                                 } else {
-                                    // Copier les données des images en niveaux de gris dans les buffers
+                                    // Copy grayscale image data into buffers
                                     err = clEnqueueWriteBuffer(commandQueue, imageBuffer0, CL_TRUE, 0, imageSize, grayImage0.data(), 0, NULL, NULL);
                                     err |= clEnqueueWriteBuffer(commandQueue, imageBuffer1, CL_TRUE, 0, imageSize, grayImage1.data(), 0, NULL, NULL);
                                     
                                     if(err != CL_SUCCESS) {
-                                        std::cerr << "Erreur lors de la copie des données des images. Utilisation de la version CPU." << std::endl;
+                                        std::cerr << "Error copying image data. Using CPU version." << std::endl;
                                         stbi_image_free(image0);
                                         stbi_image_free(image1);
                                         clReleaseMemObject(imageBuffer0);
@@ -183,21 +188,31 @@ int main(int argc, char* argv[]) {
                                         clReleaseContext(context);
                                         use_opencl = false;
                                     } else {
-                                        // Exécution du calcul de disparité avec OpenCL
-                                        std::cout << "\nCalcul de la carte de disparité avec OpenCL..." << std::endl;
+                                        // Execute disparity calculation with OpenCL
+                                        std::cout << "\nCalculating disparity map with OpenCL..." << std::endl;
                                         auto start_time = std::chrono::high_resolution_clock::now();
                                         
                                         std::vector<unsigned char> disparity = computeStereoDisparity(context, commandQueue, imageBuffer0, imageBuffer1, target_width, target_height, 1);
                                         
                                         auto end_time = std::chrono::high_resolution_clock::now();
                                         std::chrono::duration<double> elapsed = end_time - start_time;
-                                        std::cout << "Temps de calcul OpenCL: " << elapsed.count() << " secondes" << std::endl;
+                                        std::cout << "OpenCL computation time: " << elapsed.count() << " seconds" << std::endl;
                                         
-                                        // Sauvegarde de l'image de disparité
-                                        std::cout << "Sauvegarde de la carte de disparité dans " << output_path << std::endl;
-                                        stbi_write_png(output_path, width, height, 1, disparity.data(), width);
+                                        // Save disparity map
+                                        std::cout << "Saving disparity map to " << output_path << std::endl;
+                                        stbi_write_png(output_path, target_width, target_height, 1, disparity.data(), target_width);
                                         
-                                        // Libération des ressources
+                                        // Note for the user about result files
+                                        std::cout << "\nResult files generated:" << std::endl;
+                                        std::cout << "1. left_gray.png, right_gray.png - Images originales en niveaux de gris" << std::endl;
+                                        if (resize_images) {
+                                            std::cout << "2. resized_left.png, resized_right.png - Images redimensionnées" << std::endl;
+                                        }
+                                        std::cout << "3. disparity_map.png - Carte de disparité finale après lissage" << std::endl;
+                                        std::cout << "4. disparity_cross_checked.png - Carte de disparité après cross-check" << std::endl;
+                                        std::cout << "5. disparity_occlusion_filled.png - Carte de disparité après remplissage des occlusions" << std::endl;
+                                        
+                                        // Release resources
                                         stbi_image_free(image0);
                                         stbi_image_free(image1);
                                         clReleaseMemObject(imageBuffer0);
@@ -216,30 +231,30 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // ===== Version CPU =====
+    // ===== CPU Version =====
     if (!use_opencl) {
-        std::cout << "Utilisation de l'algorithme CPU..." << std::endl;
+        std::cout << "Using CPU algorithm..." << std::endl;
         
-        // Charger les images
+        // Load images
         Image left = load_image(left_path);
         Image right = load_image(right_path);
         
         if(left.width != right.width || left.height != right.height) {
-            std::cerr << "Erreur: Les images doivent avoir les mêmes dimensions!" << std::endl;
+            std::cerr << "Error: Images must have the same dimensions!" << std::endl;
             return 1;
         }
         
-        std::cout << "Calcul de la carte de disparité avec CPU..." << std::endl;
+        std::cout << "Calculating disparity map with CPU..." << std::endl;
         auto start_time = std::chrono::high_resolution_clock::now();
         
         Image disparity = computeDisparityCPU(left, right, max_disparity, window_size);
         
         auto end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> elapsed = end_time - start_time;
-        std::cout << "Temps de calcul CPU: " << elapsed.count() << " secondes" << std::endl;
+        std::cout << "CPU computation time: " << elapsed.count() << " seconds" << std::endl;
         
-        // Sauvegarde de l'image de disparité
-        std::cout << "Sauvegarde de la carte de disparité dans " << output_path << std::endl;
+        // Save disparity map
+        std::cout << "Saving disparity map to " << output_path << std::endl;
         save_disparity(output_path, disparity);
     }
     

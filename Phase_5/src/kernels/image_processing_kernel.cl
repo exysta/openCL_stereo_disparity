@@ -1,77 +1,65 @@
 // image_processing_kernel.cl
-// Kernel pour le redimensionnement et la conversion en niveaux de gris des images
+// Kernel for image resizing and grayscale conversion
 
-// Conversion RGB vers niveaux de gris
+// Convert RGB to grayscale using luminance formula
 __kernel void rgb_to_grayscale(
-    __global const uchar* input,    // image d'entrée (RGB)
-    __global uchar* output,         // image de sortie (niveaux de gris)
+    __global const uchar* input,    // input image (RGB)
+    __global uchar* output,         // output image (grayscale)
     const int width,
     const int height,
-    const int channels              // nombre de canaux de l'image d'entrée (3 pour RGB)
+    const int channels              // number of input image channels (3 for RGB)
 ) {
     const int x = get_global_id(0);
     const int y = get_global_id(1);
     
     if (x >= width || y >= height) return;
     
-    const int input_idx = (y * width + x) * channels;
-    const int output_idx = y * width + x;
+    const int idx = y * width + x;
     
-    // Conversion RGB vers niveaux de gris en utilisant la formule standard
-    // Y = 0.299*R + 0.587*G + 0.114*B
-    float r = (float)input[input_idx];
-    float g = (float)input[input_idx + 1];
-    float b = (float)input[input_idx + 2];
+    // Luminance formula: Y = 0.299R + 0.587G + 0.114B
+    float gray = 0.299f * input[idx*channels] 
+                + 0.587f * input[idx*channels+1] 
+                + 0.114f * input[idx*channels+2];
     
-    output[output_idx] = (uchar)(0.299f * r + 0.587f * g + 0.114f * b);
+    output[idx] = convert_uchar_sat(gray);
 }
 
-// Redimensionnement d'une image en niveaux de gris
+// Bilinear interpolation for image resizing
 __kernel void resize_grayscale(
-    __global const uchar* input,    // image d'entrée (niveaux de gris)
-    __global uchar* output,         // image de sortie (niveaux de gris redimensionnée)
-    const int src_width,
-    const int src_height,
-    const int dst_width,
-    const int dst_height
+    __global const uchar* input,    // input image (grayscale)
+    __global uchar* output,         // output image (resized grayscale)
+    const int src_w,
+    const int src_h,
+    const int dst_w,
+    const int dst_h
 ) {
     const int x = get_global_id(0);
     const int y = get_global_id(1);
     
-    if (x >= dst_width || y >= dst_height) return;
+    if (x >= dst_w || y >= dst_h) return;
     
-    // Calculer les coordonnées correspondantes dans l'image source
-    // en utilisant l'interpolation bilinéaire
-    float src_x = ((float)x + 0.5f) * ((float)src_width / (float)dst_width) - 0.5f;
-    float src_y = ((float)y + 0.5f) * ((float)src_height / (float)dst_height) - 0.5f;
+    // Calculate normalized coordinates
+    float x_ratio = (float)(src_w - 1) / dst_w;
+    float y_ratio = (float)(src_h - 1) / dst_h;
     
-    int src_x_int = (int)src_x;
-    int src_y_int = (int)src_y;
+    float src_x = x * x_ratio;
+    float src_y = y * y_ratio;
     
-    // Assurer que les coordonnées sont dans les limites de l'image source
-    src_x_int = max(0, min(src_width - 2, src_x_int));
-    src_y_int = max(0, min(src_height - 2, src_y_int));
+    // Get neighboring pixel coordinates
+    int x1 = clamp((int)floor(src_x), 0, src_w-1);
+    int y1 = clamp((int)floor(src_y), 0, src_h-1);
+    int x2 = clamp(x1 + 1, 0, src_w-1);
+    int y2 = clamp(y1 + 1, 0, src_h-1);
     
-    // Calculer les poids pour l'interpolation
-    float dx = src_x - src_x_int;
-    float dy = src_y - src_y_int;
+    // Calculate interpolation weights
+    float x_weight = src_x - x1;
+    float y_weight = src_y - y1;
     
-    // Récupérer les valeurs des pixels voisins
-    int idx00 = src_y_int * src_width + src_x_int;
-    int idx01 = src_y_int * src_width + (src_x_int + 1);
-    int idx10 = (src_y_int + 1) * src_width + src_x_int;
-    int idx11 = (src_y_int + 1) * src_width + (src_x_int + 1);
+    // Perform bilinear interpolation
+    float val = (1-x_weight)*(1-y_weight)*input[y1*src_w + x1]
+              + x_weight*(1-y_weight)*input[y1*src_w + x2]
+              + (1-x_weight)*y_weight*input[y2*src_w + x1]
+              + x_weight*y_weight*input[y2*src_w + x2];
     
-    float p00 = (float)input[idx00];
-    float p01 = (float)input[idx01];
-    float p10 = (float)input[idx10];
-    float p11 = (float)input[idx11];
-    
-    // Interpolation bilinéaire
-    float value = (1.0f - dx) * (1.0f - dy) * p00 +
-                  dx * (1.0f - dy) * p01 +
-                  (1.0f - dx) * dy * p10 +
-                  dx * dy * p11;
-    
-    output[y * dst_width + x] = (uchar)value;
+    output[y*dst_w + x] = convert_uchar_sat(val);
 }

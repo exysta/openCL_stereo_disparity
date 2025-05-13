@@ -4,7 +4,7 @@
 #include <vector>
 #include <OpenCL/opencl.h>
 
-// Structure pour représenter une image
+// Structure to represent an image
 struct Image {
     int width;
     int height;
@@ -15,26 +15,26 @@ struct Image {
     }
 };
 
-// Fonctions de chargement et sauvegarde d'images
+// Image loading and saving functions
 Image load_image(const char* filename);
 void save_disparity(const char* filename, const Image& img);
 
-// Pré-calcul des valeurs de fenêtre pour les deux images
+// Precompute window values for both images
 void precomputeWindowValues(const Image& img, std::vector<double>& means, std::vector<double>& stdDevs, int win_size);
 
-// Version CPU de l'algorithme de disparité stéréo
+// CPU version of the stereo disparity algorithm
 Image computeDisparityCPU(const Image& left, const Image& right, int max_disp, int win_size);
 
-// Version OpenCL de l'algorithme de disparité stéréo
+// OpenCL version of the stereo disparity algorithm
 std::vector<unsigned char> computeStereoDisparity(cl_context context, cl_command_queue commandQueue,
                                                    cl_mem imageBuffer0, cl_mem imageBuffer1,
                                                    int width, int height, int channels);
 
-// Fonction pour afficher les résultats de profilage
+// Function to display profiling results
 void printProfilingInfo(const std::string& kernelName, double executionTime, size_t globalWorkSize);
 
-// Fonction pour calculer la disparité stéréo avec CPU
+// CPU version of stereo disparity calculation
 std::vector<unsigned char> computeStereoDisparityCPU(unsigned char* image0, unsigned char* image1,
                                                     int width, int height, int channels);
 
-#endif
+#endif // STEREO_DISPARITY_H

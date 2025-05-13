@@ -8,14 +8,14 @@ int main() {
 
     err = clGetPlatformIDs(0, NULL, &numPlatforms);
     if (err != CL_SUCCESS || numPlatforms == 0) {
-        printf("Aucune plateforme OpenCL trouvée.\n");
+        printf("No OpenCL platforms found.\n");
         return EXIT_FAILURE;
     }
 
     cl_platform_id *platforms = (cl_platform_id *)malloc(sizeof(cl_platform_id) * numPlatforms);
     err = clGetPlatformIDs(numPlatforms, platforms, NULL);
     if (err != CL_SUCCESS) {
-        printf("Erreur lors de la récupération des plateformes.\n");
+        printf("Error retrieving platforms.\n");
         free(platforms);
         return EXIT_FAILURE;
     }
@@ -25,7 +25,7 @@ int main() {
     cl_device_id device;
     err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_DEFAULT, 1, &device, NULL);
     if (err != CL_SUCCESS) {
-        printf("Erreur lors de la récupération du device.\n");
+        printf("Error retrieving device.\n");
         free(platforms);
         return EXIT_FAILURE;
     }
@@ -35,7 +35,7 @@ int main() {
     if (err == CL_SUCCESS) {
         printf("CL_DEVICE_LOCAL_MEM_TYPE: %s\n",
                (localMemType == CL_LOCAL) ? "Local" :
-               (localMemType == CL_GLOBAL) ? "Global" : "Inconnu");
+               (localMemType == CL_GLOBAL) ? "Global" : "Unknown");
     }
 
     cl_ulong localMemSize;
