@@ -62,6 +62,7 @@ __kernel void resizeGrayscaleBoxFilter(
 }
 
 #define ZNCC_INVALID_DISP_OUTPUT  255
+#define MAX_LOCAL_SIZE 4096  // Par exemple, 64x64 pixels
 
 __kernel void zncc_stereo_match(
     __read_only image2d_t left_image,
@@ -90,22 +91,56 @@ __kernel void zncc_stereo_match(
 
     float max_zncc_score = -2.0f; // best score found so far
     int best_disparity_candidate = -1;
-
-    // Calculate mean for the left window (only needs to be done once)
-    float sum_L = 0.0f;
+ float sum_L = 0.0f;
+    
+    // Vectoriser la lecture des pixels en traitant 4 pixels à la fois lorsque possible
     for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
-        for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
+        int win_x = -win_radius;
+        
+        // Traiter 4 pixels à la fois quand c'est possible
+        for (; win_x + 3 <= win_radius; win_x += 4) {
+            // Lire 4 pixels consécutifs
+            uint4 val_L_vec;
+            val_L_vec.x = read_imageui(left_image, sampler, (int2)(i + win_x, j + win_y)).x;
+            val_L_vec.y = read_imageui(left_image, sampler, (int2)(i + win_x + 1, j + win_y)).x;
+            val_L_vec.z = read_imageui(left_image, sampler, (int2)(i + win_x + 2, j + win_y)).x;
+            val_L_vec.w = read_imageui(left_image, sampler, (int2)(i + win_x + 3, j + win_y)).x;
+            
+            // Additionner les 4 valeurs
+            sum_L += (float)val_L_vec.x + (float)val_L_vec.y + (float)val_L_vec.z + (float)val_L_vec.w;
+        }
+        
+        // Traiter les pixels restants un par un
+        for (; win_x <= win_radius; ++win_x) {
             int2 coord_L = (int2)(i + win_x, j + win_y);
-            // read R channel as float
             sum_L += (float)read_imageui(left_image, sampler, coord_L).x;
         }
     }
+    
     float mean_L = sum_L * inv_num_pixels;
     float sum_sq_diff_L = 0.0f; // Sum of (L_i - mean_L)^2
 
     // Calculate sum of squared differences for left window (needed for denominator)
     for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
-        for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
+        int win_x = -win_radius;
+        
+        // Traiter 4 pixels à la fois quand c'est possible
+        for (; win_x + 3 <= win_radius; win_x += 4) {
+            float4 val_L_vec;
+            val_L_vec.x = (float)read_imageui(left_image, sampler, (int2)(i + win_x, j + win_y)).x;
+            val_L_vec.y = (float)read_imageui(left_image, sampler, (int2)(i + win_x + 1, j + win_y)).x;
+            val_L_vec.z = (float)read_imageui(left_image, sampler, (int2)(i + win_x + 2, j + win_y)).x;
+            val_L_vec.w = (float)read_imageui(left_image, sampler, (int2)(i + win_x + 3, j + win_y)).x;
+            
+            // Calculer les différences vectorisées
+            float4 diff_L_vec = val_L_vec - mean_L;
+            
+            // Calculer les carrés et les additionner
+            sum_sq_diff_L += dot(diff_L_vec, diff_L_vec);
+        }
+        
+        // Traiter les pixels restants un par un
+        for (; win_x <= win_radius; ++win_x) {
             int2 coord_L = (int2)(i + win_x, j + win_y);
             float val_L = (float)read_imageui(left_image, sampler, coord_L).x;
             float diff_L = val_L - mean_L;
@@ -113,72 +148,218 @@ __kernel void zncc_stereo_match(
         }
     }
 
-    // Try all possible disparities
-    for (int d = 0; d < MAX_DISP; ++d) {
-        int disp = direction == 0 ? d : -d;  // Use positive offset for left-to-right, negative for right-to-left
-        
-        // Check if the right window's center pixel is valid
-        if ((direction == 0 && i < d) || (direction == 1 && i + d >= width)) {
-           continue; // Skip if right pixel coord is out of bounds
-        }
-
-        float sum_R = 0.0f;
-
-        // Calculate mean for the shifted right window
-        for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
-            for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
-                int2 coord_R = (int2)(i - disp + win_x, j + win_y);
-                sum_R += (float)read_imageui(right_image, sampler, coord_R).x;
+    // Optimisation: traiter plusieurs disparités en parallèle lorsque possible
+    int d = 0;
+    while (d < MAX_DISP) {
+        // Traiter 4 disparités à la fois si possible
+        if (d + 3 < MAX_DISP) {
+            float4 zncc_scores = (float4)(-2.0f);
+            int4 disp_vec;
+            disp_vec.x = direction == 0 ? d : -d;
+            disp_vec.y = direction == 0 ? (d+1) : -(d+1);
+            disp_vec.z = direction == 0 ? (d+2) : -(d+2);
+            disp_vec.w = direction == 0 ? (d+3) : -(d+3);
+            
+            // Vérifier si les disparités sont valides
+            bool4 valid_disp;
+            valid_disp.x = !((direction == 0 && i < d) || (direction == 1 && i + d >= width));
+            valid_disp.y = !((direction == 0 && i < (d+1)) || (direction == 1 && i + (d+1) >= width));
+            valid_disp.z = !((direction == 0 && i < (d+2)) || (direction == 1 && i + (d+2) >= width));
+            valid_disp.w = !((direction == 0 && i < (d+3)) || (direction == 1 && i + (d+3) >= width));
+            
+            if (valid_disp.x || valid_disp.y || valid_disp.z || valid_disp.w) {
+                // Calculer les scores ZNCC pour les 4 disparités
+                for (int disp_idx = 0; disp_idx < 4; disp_idx++) {
+                    if ((disp_idx == 0 && valid_disp.x) || 
+                        (disp_idx == 1 && valid_disp.y) || 
+                        (disp_idx == 2 && valid_disp.z) || 
+                        (disp_idx == 3 && valid_disp.w)) {
+                        
+                        int current_d = d + disp_idx;
+                        int disp = direction == 0 ? current_d : -current_d;
+                        
+                        float sum_R = 0.0f;
+                        
+                        // Calculer la moyenne pour la fenêtre droite décalée
+                        for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
+                            int win_x = -win_radius;
+                            
+                            // Traiter 4 pixels à la fois quand c'est possible
+                            for (; win_x + 3 <= win_radius; win_x += 4) {
+                                uint4 val_R_vec;
+                                val_R_vec.x = read_imageui(right_image, sampler, (int2)(i - disp + win_x, j + win_y)).x;
+                                val_R_vec.y = read_imageui(right_image, sampler, (int2)(i - disp + win_x + 1, j + win_y)).x;
+                                val_R_vec.z = read_imageui(right_image, sampler, (int2)(i - disp + win_x + 2, j + win_y)).x;
+                                val_R_vec.w = read_imageui(right_image, sampler, (int2)(i - disp + win_x + 3, j + win_y)).x;
+                                
+                                sum_R += (float)val_R_vec.x + (float)val_R_vec.y + (float)val_R_vec.z + (float)val_R_vec.w;
+                            }
+                            
+                            // Traiter les pixels restants un par un
+                            for (; win_x <= win_radius; ++win_x) {
+                                int2 coord_R = (int2)(i - disp + win_x, j + win_y);
+                                sum_R += (float)read_imageui(right_image, sampler, coord_R).x;
+                            }
+                        }
+                        
+                        float mean_R = sum_R * inv_num_pixels;
+                        float numerator = 0.0f;
+                        float sum_sq_diff_R = 0.0f;
+                        
+                        // Calculer le numérateur et la somme des carrés des différences pour la fenêtre droite
+                        for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
+                            int win_x = -win_radius;
+                            
+                            // Traiter 4 pixels à la fois quand c'est possible
+                            for (; win_x + 3 <= win_radius; win_x += 4) {
+                                // Lire 4 pixels consécutifs de l'image gauche
+                                float4 val_L_vec;
+                                val_L_vec.x = (float)read_imageui(left_image, sampler, (int2)(i + win_x, j + win_y)).x;
+                                val_L_vec.y = (float)read_imageui(left_image, sampler, (int2)(i + win_x + 1, j + win_y)).x;
+                                val_L_vec.z = (float)read_imageui(left_image, sampler, (int2)(i + win_x + 2, j + win_y)).x;
+                                val_L_vec.w = (float)read_imageui(left_image, sampler, (int2)(i + win_x + 3, j + win_y)).x;
+                                
+                                // Lire 4 pixels consécutifs de l'image droite
+                                float4 val_R_vec;
+                                val_R_vec.x = (float)read_imageui(right_image, sampler, (int2)(i - disp + win_x, j + win_y)).x;
+                                val_R_vec.y = (float)read_imageui(right_image, sampler, (int2)(i - disp + win_x + 1, j + win_y)).x;
+                                val_R_vec.z = (float)read_imageui(right_image, sampler, (int2)(i - disp + win_x + 2, j + win_y)).x;
+                                val_R_vec.w = (float)read_imageui(right_image, sampler, (int2)(i - disp + win_x + 3, j + win_y)).x;
+                                
+                                // Calculer les différences vectorisées
+                                float4 diff_L_vec = val_L_vec - mean_L;
+                                float4 diff_R_vec = val_R_vec - mean_R;
+                                
+                                // Calculer le numérateur et la somme des carrés
+                                numerator += dot(diff_L_vec, diff_R_vec);
+                                sum_sq_diff_R += dot(diff_R_vec, diff_R_vec);
+                            }
+                            
+                            // Traiter les pixels restants un par un
+                            for (; win_x <= win_radius; ++win_x) {
+                                int2 coord_L = (int2)(i + win_x, j + win_y);
+                                int2 coord_R = (int2)(i - disp + win_x, j + win_y);
+                                
+                                float val_L = (float)read_imageui(left_image, sampler, coord_L).x;
+                                float val_R = (float)read_imageui(right_image, sampler, coord_R).x;
+                                
+                                float diff_L = val_L - mean_L;
+                                float diff_R = val_R - mean_R;
+                                
+                                numerator += diff_L * diff_R;
+                                sum_sq_diff_R += diff_R * diff_R;
+                            }
+                        }
+                        
+                        // Calculer le score ZNCC
+                        float current_zncc_score = -2.0f; // Score invalide par défaut
+                        float denominator = sqrt(sum_sq_diff_L * sum_sq_diff_R);
+                        const float epsilon = 1e-6f; // petite valeur pour éviter la division par zéro
+                        
+                        if (denominator > epsilon) {
+                            current_zncc_score = numerator / denominator;
+                            // S'assurer que le score est dans la plage valide [-1, 1]
+                            current_zncc_score = clamp(current_zncc_score, -1.0f, 1.0f);
+                        }
+                        
+                        // Stocker le score dans le vecteur
+                        if (disp_idx == 0) zncc_scores.x = current_zncc_score;
+                        else if (disp_idx == 1) zncc_scores.y = current_zncc_score;
+                        else if (disp_idx == 2) zncc_scores.z = current_zncc_score;
+                        else zncc_scores.w = current_zncc_score;
+                    }
+                }
+                
+                // Trouver le meilleur score parmi les 4 disparités
+                if (valid_disp.x && zncc_scores.x > max_zncc_score) {
+                    max_zncc_score = zncc_scores.x;
+                    best_disparity_candidate = d;
+                }
+                if (valid_disp.y && zncc_scores.y > max_zncc_score) {
+                    max_zncc_score = zncc_scores.y;
+                    best_disparity_candidate = d + 1;
+                }
+                if (valid_disp.z && zncc_scores.z > max_zncc_score) {
+                    max_zncc_score = zncc_scores.z;
+                    best_disparity_candidate = d + 2;
+                }
+                if (valid_disp.w && zncc_scores.w > max_zncc_score) {
+                    max_zncc_score = zncc_scores.w;
+                    best_disparity_candidate = d + 3;
+                }
             }
-        }
-        float mean_R = sum_R * inv_num_pixels;
-
-        float numerator = 0.0f;    // Sum of (L_i - mean_L) * (R_i - mean_R)
-        float sum_sq_diff_R = 0.0f; // Sum of (R_i - mean_R)^2
-
-        // Calculate numerator and sum of squared differences for right window
-        for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
-            for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
-                int2 coord_L = (int2)(i + win_x, j + win_y);
-                int2 coord_R = (int2)(i - disp + win_x, j + win_y);
-
-                float val_L = (float)read_imageui(left_image, sampler, coord_L).x;
-                float val_R = (float)read_imageui(right_image, sampler, coord_R).x;
-
-                float diff_L = val_L - mean_L;
-                float diff_R = val_R - mean_R;
-
-                numerator += diff_L * diff_R;
-                sum_sq_diff_R += diff_R * diff_R;
+            
+            d += 4;
+        } else {
+            // Traiter les disparités restantes une par une (code original)
+            int disp = direction == 0 ? d : -d;
+            
+            // Check if the right window's center pixel is valid
+            if ((direction == 0 && i < d) || (direction == 1 && i + d >= width)) {
+                d++;
+                continue; // Skip if right pixel coord is out of bounds
             }
-        }
-
-        // Calculate ZNCC
-        float current_zncc_score = -2.0f; // Invalid score default
-        float denominator = sqrt(sum_sq_diff_L * sum_sq_diff_R);
-        const float epsilon = 1e-6f; // small value to avoid div by zero
-
-        if (denominator > epsilon) {
-            current_zncc_score = numerator / denominator;
-            // Ensure score is in valid range [-1, 1]
-            current_zncc_score = clamp(current_zncc_score, -1.0f, 1.0f);
-        }
-        // else: score stays invalid (-2.0)
-
-        // Found a better match?
-        if (current_zncc_score > max_zncc_score) {
-            max_zncc_score = current_zncc_score;
-            best_disparity_candidate = d;
+            
+            float sum_R = 0.0f;
+            
+            // Calculate mean for the shifted right window
+            for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
+                for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
+                    int2 coord_R = (int2)(i - disp + win_x, j + win_y);
+                    sum_R += (float)read_imageui(right_image, sampler, coord_R).x;
+                }
+            }
+            float mean_R = sum_R * inv_num_pixels;
+            
+            float numerator = 0.0f;    // Sum of (L_i - mean_L) * (R_i - mean_R)
+            float sum_sq_diff_R = 0.0f; // Sum of (R_i - mean_R)^2
+            
+            // Calculate numerator and sum of squared differences for right window
+            for (int win_y = -win_radius; win_y <= win_radius; ++win_y) {
+                for (int win_x = -win_radius; win_x <= win_radius; ++win_x) {
+                    int2 coord_L = (int2)(i + win_x, j + win_y);
+                    int2 coord_R = (int2)(i - disp + win_x, j + win_y);
+                    
+                    float val_L = (float)read_imageui(left_image, sampler, coord_L).x;
+                    float val_R = (float)read_imageui(right_image, sampler, coord_R).x;
+                    
+                    float diff_L = val_L - mean_L;
+                    float diff_R = val_R - mean_R;
+                    
+                    numerator += diff_L * diff_R;
+                    sum_sq_diff_R += diff_R * diff_R;
+                }
+            }
+            
+            // Calculate ZNCC
+            float current_zncc_score = -2.0f; // Invalid score default
+            float denominator = sqrt(sum_sq_diff_L * sum_sq_diff_R);
+            const float epsilon = 1e-6f; // small value to avoid div by zero
+            
+            if (denominator > epsilon) {
+                current_zncc_score = numerator / denominator;
+                // Ensure score is in valid range [-1, 1]
+                current_zncc_score = clamp(current_zncc_score, -1.0f, 1.0f);
+            }
+            
+            // Found a better match?
+            if (current_zncc_score > max_zncc_score) {
+                max_zncc_score = current_zncc_score;
+                best_disparity_candidate = d;
+            }
+            
+            d++;
         }
     }
-
+    
     const int output_index = j * width + i;
     const float ZNCC_ACCEPTANCE_THRESHOLD = 0.5f; // Example threshold
-
+    
     // If max_zncc_score is good enough AND we actually found a candidate disparity
     if (max_zncc_score > ZNCC_ACCEPTANCE_THRESHOLD && best_disparity_candidate != -1) {
         raw_disparity_map[output_index] = (uchar)best_disparity_candidate; // Store raw disparity
     } else {
+
         // No acceptable match found, or MAX_DISP was 0
         raw_disparity_map[output_index] = ZNCC_INVALID_DISP_OUTPUT; // Use the #defined marker
     }

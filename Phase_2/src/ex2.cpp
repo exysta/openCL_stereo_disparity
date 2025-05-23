@@ -221,46 +221,78 @@ int main() {
     ExecutionTiming timing;
     auto start_total = std::chrono::high_resolution_clock::now();
     
+    // Process first image (im0.png)
     // Read the image
     auto start = std::chrono::high_resolution_clock::now();
-    Image originalImage = readImage("../ressources/im0.png");
+    Image originalImage0 = readImage("../ressources/im0.png");
     auto end = std::chrono::high_resolution_clock::now();
     timing.readTime = std::chrono::duration<double>(end - start).count();
     
-    if (originalImage.data.empty()) {
-        std::cerr << "Failed to read the image." << std::endl;
+    if (originalImage0.data.empty()) {
+        std::cerr << "Failed to read the image im0.png." << std::endl;
         return 1;
     }
     
     // Resize the image
     start = std::chrono::high_resolution_clock::now();
-    Image resizedImage = resizeImage(originalImage);
+    Image resizedImage0 = resizeImage(originalImage0);
     end = std::chrono::high_resolution_clock::now();
     timing.resizeTime = std::chrono::duration<double>(end - start).count();
     
     // Save the resized image for visualization
-    writeRGBAImage("../output/image_0_resized.png", resizedImage);
+    writeRGBAImage("../output/image_0_resized.png", resizedImage0);
     
     // Convert to grayscale
     start = std::chrono::high_resolution_clock::now();
-    Image grayscaleImage = convertToGrayscale(resizedImage);
+    Image grayscaleImage0 = convertToGrayscale(resizedImage0);
     end = std::chrono::high_resolution_clock::now();
     timing.grayscaleTime = std::chrono::duration<double>(end - start).count();
     
     // Save the grayscale image
-    writeImage("../output/image_0_grayscale.png", grayscaleImage);
+    writeImage("../output/image_0_grayscale.png", grayscaleImage0);
     
     // Apply the filter
     start = std::chrono::high_resolution_clock::now();
-    Image filteredImage = applyFilter(grayscaleImage);
+    Image filteredImage0 = applyFilter(grayscaleImage0);
     end = std::chrono::high_resolution_clock::now();
     timing.filterTime = std::chrono::duration<double>(end - start).count();
     
     // Write the final image
     start = std::chrono::high_resolution_clock::now();
-    writeImage("../output/image_0_bw.png", filteredImage);
+    writeImage("../output/image_0_bw.png", filteredImage0);
     end = std::chrono::high_resolution_clock::now();
     timing.writeTime = std::chrono::duration<double>(end - start).count();
+    
+    // Process second image (im1.png)
+    std::cout << "\nProcessing second image..." << std::endl;
+    
+    // Read the image
+    start = std::chrono::high_resolution_clock::now();
+    Image originalImage1 = readImage("../ressources/im1.png");
+    end = std::chrono::high_resolution_clock::now();
+    
+    if (originalImage1.data.empty()) {
+        std::cerr << "Failed to read the image im1.png." << std::endl;
+        return 1;
+    }
+    
+    // Resize the image
+    Image resizedImage1 = resizeImage(originalImage1);
+    
+    // Save the resized image for visualization
+    writeRGBAImage("../output/image_1_resized.png", resizedImage1);
+    
+    // Convert to grayscale
+    Image grayscaleImage1 = convertToGrayscale(resizedImage1);
+    
+    // Save the grayscale image
+    writeImage("../output/image_1_grayscale.png", grayscaleImage1);
+    
+    // Apply the filter
+    Image filteredImage1 = applyFilter(grayscaleImage1);
+    
+    // Write the final image
+    writeImage("../output/image_1_bw.png", filteredImage1);
     
     // Calculate total execution time
     auto end_total = std::chrono::high_resolution_clock::now();

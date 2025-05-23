@@ -1,19 +1,16 @@
-#define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image.h"
-#include "stb_image_write.h"
-
 #include <iostream>
 #include <vector>
+#include <chrono>
 #include <cmath>
 #include <algorithm>
-#include <chrono>
 #include <iomanip>
+#include "lodepng.h"
 
 using namespace std;
 
+// Structure to hold image data
 struct Image {
-    int width, height;
+    unsigned width, height;
     vector<unsigned char> data;
     
     unsigned char at(int x, int y) const {
@@ -41,25 +38,34 @@ void displayProfilingInfo(const ExecutionTiming& timing) {
     std::cout << "--------------------------------" << std::endl;
     std::cout << "Total computation time: " << timing.totalTime << " seconds" << std::endl;
     std::cout << "=================================" << std::endl;
-};
+}
 
-Image load_image(const char* filename) {
-    Image img;
-    int channels;
-    unsigned char* data = stbi_load(filename, &img.width, &img.height, &channels, 1);
+// Function to read a grayscale image
+Image loadImage(const char* filename) {
+    vector<unsigned char> png;
+    unsigned width, height;
+    unsigned error = lodepng::decode(png, width, height, filename, LodePNGColorType::LCT_GREY, 8);
     
-    if(!data) {
-        cerr << "Error loading image: " << filename << endl;
+    if (error) {
+        cerr << "Error loading image: " << lodepng_error_text(error) << endl;
         exit(1);
     }
     
-    img.data.assign(data, data + img.width * img.height);
-    stbi_image_free(data);
+    Image img;
+    img.width = width;
+    img.height = height;
+    img.data = png;
+    
     return img;
 }
 
-void save_disparity(const char* filename, const Image& img) {
-    stbi_write_png(filename, img.width, img.height, 1, img.data.data(), img.width);
+// Function to save a grayscale image
+void saveImage(const char* filename, const Image& img) {
+    unsigned error = lodepng::encode(filename, img.data, img.width, img.height, LodePNGColorType::LCT_GREY, 8);
+    
+    if (error) {
+        cerr << "Error saving image: " << lodepng_error_text(error) << endl;
+    }
 }
 
 // Pre-compute window values for both images
@@ -76,8 +82,8 @@ void precomputeWindowValues(const Image& img, vector<double>& means, vector<doub
             double sumSq = 0;
             int count = 0;
             
-            for(int wy = max(0, y - win_size); wy <= min(height - 1, y + win_size); wy++) {
-                for(int wx = max(0, x - win_size); wx <= min(width - 1, x + win_size); wx++) {
+            for(int wy = max(0, y - win_size); wy <= min((int)height - 1, y + win_size); wy++) {
+                for(int wx = max(0, x - win_size); wx <= min((int)width - 1, x + win_size); wx++) {
                     double val = img.at(wx, wy);
                     sum += val;
                     sumSq += val * val;
@@ -95,10 +101,14 @@ void precomputeWindowValues(const Image& img, vector<double>& means, vector<doub
     }
 }
 
+// Compute disparity map
 Image computeDisparity(const Image& left, const Image& right, int max_disp, int win_size, double& precomputeTime) {
     int width = left.width;
     int height = left.height;
-    Image disparity{width, height, vector<unsigned char>(width * height, 0)};
+    Image disparity;
+    disparity.width = width;
+    disparity.height = height;
+    disparity.data.resize(width * height, 0);
     
     // Pre-compute window means and standard deviations
     vector<double> leftMeans, leftStdDevs, rightMeans, rightStdDevs;
@@ -181,9 +191,9 @@ int main(int argc, char* argv[]) {
     ExecutionTiming timing = {}; // Initialize all timing values to 0
     auto start_total = chrono::high_resolution_clock::now();
     
-    const char* left_path = "../ressources/image_0_bw.png";
-    const char* right_path = "../ressources/image_1_bw.png";
-    const char* output_path = "../output/disparityV2.png";
+    const char* left_path = "../output/image_0_bw.png";
+    const char* right_path = "../output/image_1_bw.png";
+    const char* output_path = "../output/disparity.png";
     
     int max_disparity = 50;
     int window_size = 9;
@@ -205,8 +215,8 @@ int main(int argc, char* argv[]) {
     
     cout << "Loading images..." << endl;
     auto load_start = chrono::high_resolution_clock::now();
-    Image left = load_image(left_path);
-    Image right = load_image(right_path);
+    Image left = loadImage(left_path);
+    Image right = loadImage(right_path);
     auto load_end = chrono::high_resolution_clock::now();
     timing.loadImagesTime = chrono::duration<double>(load_end - load_start).count();
     
@@ -227,7 +237,7 @@ int main(int argc, char* argv[]) {
     
     cout << "Saving disparity map to " << output_path << endl;
     auto save_start = chrono::high_resolution_clock::now();
-    save_disparity(output_path, disparity);
+    saveImage(output_path, disparity);
     auto save_end = chrono::high_resolution_clock::now();
     timing.saveImageTime = chrono::duration<double>(save_end - save_start).count();
     

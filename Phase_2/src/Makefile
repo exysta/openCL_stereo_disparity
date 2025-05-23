@@ -1,12 +1,24 @@
 CXX = g++
-CXXFLAGS = -lOpenCL
-TARGET = ex3
-SRCS = ex3.c lodepng.cpp
+TARGETS = ex2 ex3 StereoDisparity
 
-all: $(TARGET)
+ifeq ($(shell uname), Darwin)
+    # macOS specific flags
+    OPENCL_FLAGS = -framework OpenCL
+else
+    # Linux/other specific flags
+    OPENCL_FLAGS = -lOpenCL
+endif
 
-$(TARGET): $(SRCS)
-	$(CXX) -o $(TARGET) $(SRCS) $(CXXFLAGS)
+all: $(TARGETS)
+
+ex2: ex2.cpp lodepng.cpp
+	$(CXX) -o $@ $^
+
+ex3: ex3.c lodepng.cpp
+	$(CXX) -o $@ $^ $(OPENCL_FLAGS)
+
+StereoDisparity: StereoDisparity.cpp lodepng.cpp
+	$(CXX) -o $@ $^
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)

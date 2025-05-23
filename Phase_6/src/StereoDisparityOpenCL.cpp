@@ -1,4 +1,8 @@
+#ifdef __APPLE__
+#include <OpenCL/opencl.h>
+#else
 #include <CL/cl.h>
+#endif
 #include "lodepng.h"
 #include <iostream>
 #include <vector>
@@ -10,7 +14,7 @@
 #include <chrono>
 #include <numeric>
 #include <algorithm>
-#include <filesystem> // Need C++17
+// Removed filesystem dependency
 
 // Custom OpenCLException
 class OpenCLException : public std::runtime_error {
@@ -120,11 +124,14 @@ void saveGrayscalePNG(const std::string& filename,
                       const std::vector<unsigned char>& imageData,
                       unsigned width, unsigned height) {
     // Create directory if it doesn't exist
-    std::filesystem::path filePath(filename);
-    std::filesystem::path dirPath = filePath.parent_path();
-    if (!dirPath.empty() && !std::filesystem::exists(dirPath)) {
-        std::cout << "Creating output directory: " << dirPath << std::endl;
-        std::filesystem::create_directories(dirPath);
+    size_t lastSlash = filename.find_last_of("/\\");
+    if (lastSlash != std::string::npos) {
+        std::string dirPath = filename.substr(0, lastSlash);
+        if (!dirPath.empty()) {
+            // Use system command to create directory
+            std::string mkdirCmd = "mkdir -p '" + dirPath + "'";
+            system(mkdirCmd.c_str());
+        }
     }
 
     unsigned error = lodepng::encode(filename, imageData, width, height, LCT_GREY, 8);
@@ -208,7 +215,12 @@ bool initOpenCL(cl_platform_id& platform, cl_device_id& device,
         checkError(error, "Failed to create context");
 
         // Create command queue
+        #ifdef __APPLE__
+        // Sur macOS, utiliser la fonction standard clCreateCommandQueue pour une meilleure compatibilité
+        queue = clCreateCommandQueue(context, device, 0, &error);
+        #else
         queue = clCreateCommandQueueWithProperties(context, device, 0, &error);
+        #endif
         checkError(error, "Failed to create command queue");
 
         return true;
@@ -469,11 +481,12 @@ int main(int argc, char* argv[]) {
     const std::string kernel_file_path = "kernels.cl"; // Ensure this path is correct
     const std::string output_dir = "../output/";
     try { // filesystem operations can throw
-        if (!output_dir.empty() && !std::filesystem::exists(output_dir)) {
-            std::cout << "Creating output directory: " << output_dir << std::endl;
-            std::filesystem::create_directories(output_dir);
+        if (!output_dir.empty()) {
+            // Create directory if it doesn't exist using system command
+            std::string mkdirCmd = "mkdir -p '" + output_dir + "'";
+            system(mkdirCmd.c_str());
         }
-    } catch (const std::filesystem::filesystem_error& fs_err) {
+    } catch (const std::exception& fs_err) {
         std::cerr << "Filesystem error creating output directory: " << fs_err.what() << std::endl;
         // Decide if this is fatal or if you can proceed assuming current dir for output
         return 1; 
@@ -543,8 +556,8 @@ int main(int argc, char* argv[]) {
     cl_mem im1_formated_uchar_cl = nullptr; 
 
     // OpenCL Buffers
-    cl_mem d_rawDispLR = nullptr;          
-    cl_mem d_rawDispRL = nullptr;          
+    cl_mem d_rawDispLR = nullptr;          // Raw disparity map from left-to-right matching
+    cl_mem d_rawDispRL = nullptr;          // Raw disparity map from right-to-left matching
     cl_mem d_finalRawDisp = nullptr; // Output of cross_check_and_fill_kernel (raw disparities)
     cl_mem d_visualizableDispMap = nullptr; // Final scaled disparity map for saving
     
@@ -646,13 +659,18 @@ int main(int argc, char* argv[]) {
             verifyImageObjects(queue, im1_image_rgba_cl, width, height, "im1_image_rgba_cl (input)");
         }
 
+        #ifdef __APPLE__
+        // On macOS, use the older sampler creation API
+        sampler = clCreateSampler(context, CL_FALSE, CL_ADDRESS_CLAMP_TO_EDGE, CL_FILTER_NEAREST, &err);
+        #else
         cl_sampler_properties samplerProps[] = {
-            CL_SAMPLER_NORMALIZED_COORDS, CL_FALSE, 
+            CL_SAMPLER_NORMALIZED_COORDS, CL_FALSE,
             CL_SAMPLER_ADDRESSING_MODE, CL_ADDRESS_CLAMP_TO_EDGE,
-            CL_SAMPLER_FILTER_MODE, CL_FILTER_NEAREST, 
-            0 
+            CL_SAMPLER_FILTER_MODE, CL_FILTER_NEAREST,
+            0
         };
         sampler = clCreateSamplerWithProperties(context, samplerProps, &err);
+        #endif
         checkError(err, "Failed to create sampler");
         
         size_t disparity_image_size_pixels = static_cast<size_t>(out_width) * out_height;
@@ -722,7 +740,15 @@ int main(int argc, char* argv[]) {
         timing_labels.push_back("ZNCC LR Disparity");
         std::cout << "\nExecuting " << timing_labels.back() << " Kernel..." << std::endl;
         stage_start_time = std::chrono::high_resolution_clock::now();
-        size_t globalSizeZNCC[2] = {out_width, out_height};
+        // Définir la taille des groupes de travail pour optimiser l'utilisation de la mémoire locale
+        // Choisir une taille qui est un multiple de 16 pour de meilleures performances sur GPU
+        const size_t localSizeZNCC[2] = {16, 16}; // 16x16 = 256 threads par groupe
+        
+        // Ajuster la taille globale pour qu'elle soit un multiple de la taille locale
+        size_t globalSizeZNCC[2] = {
+            ((out_width + localSizeZNCC[0] - 1) / localSizeZNCC[0]) * localSizeZNCC[0],
+            ((out_height + localSizeZNCC[1] - 1) / localSizeZNCC[1]) * localSizeZNCC[1]
+        };
         int direction_right_to_left = 0; // 0 = left-to-right matching, 1 = right-to-left matching
         err_arg = 0;
         err_arg |= clSetKernelArg(znccKernel, 0, sizeof(cl_mem), &im0_formated_uchar_cl);
@@ -736,7 +762,7 @@ int main(int argc, char* argv[]) {
         err_arg |= clSetKernelArg(znccKernel, 8, sizeof(int), &direction_right_to_left); 
 
         checkError(err_arg, "Setting ZNCC (LR) kernel arguments");
-        err = clEnqueueNDRangeKernel(queue, znccKernel, 2, NULL, globalSizeZNCC, NULL, 0, NULL, NULL);
+        err = clEnqueueNDRangeKernel(queue, znccKernel, 2, NULL, globalSizeZNCC, localSizeZNCC, 0, NULL, NULL);
         checkError(err, "Enqueueing ZNCC (LR) kernel");
         err = clFinish(queue); 
         checkError(err, "Waiting for ZNCC (LR) kernel to finish");
@@ -766,7 +792,7 @@ int main(int argc, char* argv[]) {
         err_arg |= clSetKernelArg(znccKernel, 8, sizeof(int), &direction_right_to_left); 
 
         checkError(err_arg, "Setting ZNCC (RL) kernel arguments (image/buffer only)");
-        err = clEnqueueNDRangeKernel(queue, znccKernel, 2, NULL, globalSizeZNCC, NULL, 0, NULL, NULL);
+        err = clEnqueueNDRangeKernel(queue, znccKernel, 2, NULL, globalSizeZNCC, localSizeZNCC, 0, NULL, NULL);
         checkError(err, "Enqueueing ZNCC (RL) kernel");
         err = clFinish(queue); 
         checkError(err, "Waiting for ZNCC (RL) kernel to finish");
