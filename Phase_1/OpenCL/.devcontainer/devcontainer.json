@@ -1,0 +1,20 @@
+{
+	"name": "Intel OpenCL DevContainer (Ubuntu 24.04)",
+	"dockerFile": "Dockerfile",
+	"customizations": {
+	  "vscode": {
+		"settings": {
+		  "terminal.integrated.defaultProfile.linux": "bash"
+		},
+		"extensions": [
+		  "ms-vscode.cpptools",
+		  "llvm-vs-code-extensions.vscode-clangd"
+		]
+	  }
+	},
+	"remoteUser": "vscode",
+	"runArgs": ["--device=/dev/dri"],
+	"mounts": ["type=bind,source=/dev/dri,target=/dev/dri"],
+	"postCreateCommand": "mkdir -p build && cd build && cmake .. && make"
+  }
+  
