@@ -83,7 +83,7 @@ int main()
 
     //DEVICE (could be CL_DEVICE_TYPE_GPU)
     //
-    err = clGetDeviceIDs(platforms[0], CL_DEVICE_TYPE_ALL, 1, &device, NULL);
+    err = clGetDeviceIDs(platforms[0], CL_DEVICE_TYPE_GPU, 1, &device, NULL);
 
     //CONTEXT
     //
@@ -113,7 +113,6 @@ int main()
     //
     err = clEnqueueReadBuffer(queue, output, CL_TRUE, 0, 13 * sizeof(char), result, 0, NULL, NULL);
     printf("***%s***", result);
-
 
     //Free your memory please....
     clReleaseMemObject(output);

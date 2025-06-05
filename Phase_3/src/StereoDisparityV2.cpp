@@ -8,6 +8,7 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <iomanip>
 
 using namespace std;
 
@@ -18,6 +19,28 @@ struct Image {
     unsigned char at(int x, int y) const {
         return data[y * width + x];
     }
+};
+
+// Structure to track execution timing
+struct ExecutionTiming {
+    double loadImagesTime;
+    double precomputeWindowsTime;
+    double disparityComputationTime;
+    double saveImageTime;
+    double totalTime;
+};
+
+// Function to display profiling information
+void displayProfilingInfo(const ExecutionTiming& timing) {
+    std::cout << "\n===== Profiling Information =====" << std::endl;
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "Load images:           " << timing.loadImagesTime << " seconds" << std::endl;
+    std::cout << "Precompute windows:    " << timing.precomputeWindowsTime << " seconds" << std::endl;
+    std::cout << "Disparity computation: " << timing.disparityComputationTime << " seconds" << std::endl;
+    std::cout << "Save image:            " << timing.saveImageTime << " seconds" << std::endl;
+    std::cout << "--------------------------------" << std::endl;
+    std::cout << "Total computation time: " << timing.totalTime << " seconds" << std::endl;
+    std::cout << "=================================" << std::endl;
 };
 
 Image load_image(const char* filename) {
@@ -72,15 +95,19 @@ void precomputeWindowValues(const Image& img, vector<double>& means, vector<doub
     }
 }
 
-Image computeDisparity(const Image& left, const Image& right, int max_disp, int win_size) {
+Image computeDisparity(const Image& left, const Image& right, int max_disp, int win_size, double& precomputeTime) {
     int width = left.width;
     int height = left.height;
     Image disparity{width, height, vector<unsigned char>(width * height, 0)};
     
     // Pre-compute window means and standard deviations
     vector<double> leftMeans, leftStdDevs, rightMeans, rightStdDevs;
+    
+    auto precompute_start = chrono::high_resolution_clock::now();
     precomputeWindowValues(left, leftMeans, leftStdDevs, win_size);
     precomputeWindowValues(right, rightMeans, rightStdDevs, win_size);
+    auto precompute_end = chrono::high_resolution_clock::now();
+    precomputeTime = chrono::duration<double>(precompute_end - precompute_start).count();
     
     for(int y = 0; y < height; y++) {
         for(int x = 0; x < width; x++) {
@@ -151,6 +178,9 @@ Image computeDisparity(const Image& left, const Image& right, int max_disp, int 
 }
 
 int main(int argc, char* argv[]) {
+    ExecutionTiming timing = {}; // Initialize all timing values to 0
+    auto start_total = chrono::high_resolution_clock::now();
+    
     const char* left_path = "../ressources/image_0_bw.png";
     const char* right_path = "../ressources/image_1_bw.png";
     const char* output_path = "../output/disparityV2.png";
@@ -174,8 +204,11 @@ int main(int argc, char* argv[]) {
     }
     
     cout << "Loading images..." << endl;
+    auto load_start = chrono::high_resolution_clock::now();
     Image left = load_image(left_path);
     Image right = load_image(right_path);
+    auto load_end = chrono::high_resolution_clock::now();
+    timing.loadImagesTime = chrono::duration<double>(load_end - load_start).count();
     
     if(left.width != right.width || left.height != right.height) {
         cerr << "Error: Images must have the same dimensions!" << endl;
@@ -183,16 +216,26 @@ int main(int argc, char* argv[]) {
     }
 
     cout << "Computing disparity map..." << endl;
-    auto start_time = chrono::high_resolution_clock::now();
+    double precomputeTime = 0.0;
+    auto disparity_start = chrono::high_resolution_clock::now();
     
-    Image disparity = computeDisparity(left, right, max_disparity, window_size);
+    Image disparity = computeDisparity(left, right, max_disparity, window_size, precomputeTime);
     
-    auto end_time = chrono::high_resolution_clock::now();
-    chrono::duration<double> elapsed = end_time - start_time;
-    cout << "Computation time: " << elapsed.count() << " seconds" << endl;
+    auto disparity_end = chrono::high_resolution_clock::now();
+    timing.precomputeWindowsTime = precomputeTime;
+    timing.disparityComputationTime = chrono::duration<double>(disparity_end - disparity_start).count();
     
     cout << "Saving disparity map to " << output_path << endl;
+    auto save_start = chrono::high_resolution_clock::now();
     save_disparity(output_path, disparity);
+    auto save_end = chrono::high_resolution_clock::now();
+    timing.saveImageTime = chrono::duration<double>(save_end - save_start).count();
+    
+    auto end_total = chrono::high_resolution_clock::now();
+    timing.totalTime = chrono::duration<double>(end_total - start_total).count();
+    
+    // Display profiling information
+    displayProfilingInfo(timing);
     
     return 0;
 }
